@@ -20,6 +20,14 @@
     <!-- Vibration for incoming-message notifications -->
     <uses-permission android:name="android.permission.VIBRATE"/>
 
+    <!-- Voice messages -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+
+    <!-- QR code scanning -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+
     <application
         android:label="Send"
         android:name="${applicationName}"

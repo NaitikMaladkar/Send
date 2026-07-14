@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
+import '../services/haptic_service.dart';
 import '../services/keystore.dart';
+import '../utils/constants.dart';
+import '../utils/theme.dart';
 import 'onboarding_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -76,6 +79,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthService>();
+    final theme = context.watch<ThemeService>();
     return Scaffold(
       appBar: AppBar(title: const Text('Profile')),
       body: _loading
@@ -99,22 +103,72 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   const SizedBox(height: 4),
                   Center(
                     child: Text('Identity: ${auth.active!.id.substring(0, 16)}…',
-                        style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                        style: const TextStyle(color: Colors.grey, fontSize: 12)),
                   ),
                   const SizedBox(height: 16),
                   Center(
                     child: Text(
-                        'Active ${auth.friends.length} friend${auth.friends.length == 1 ? '' : 's'}',
+                        'Active ${auth.friends.length} friend${auth.friends.length == 1 ? '' : 's'} · '
+                        '${auth.groups.length} group${auth.groups.length == 1 ? '' : 's'}',
                         style: const TextStyle(color: Colors.white70)),
                   ),
                 ],
                 const SizedBox(height: 24),
-                const Text('Identities on this device',
-                    style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w600)),
+
+                // ---------- Privacy settings ----------
+                _SectionHeader('Privacy'),
+                ListTile(
+                  leading: const Icon(Icons.timer),
+                  title: const Text('Disappearing messages'),
+                  subtitle: Text(
+                      'Default: ${_formatDuration(auth.disappearingDefault)}\n'
+                      'Adjustable 1h–30d · cannot be turned off'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _showDisappearingPicker(auth),
+                ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.visibility),
+                  title: const Text('Read receipts'),
+                  subtitle: Text(
+                    auth.readReceipts
+                        ? 'On — you and your friends see when messages are read'
+                        : 'Off — you also won\'t see others\' read receipts'),
+                  value: auth.readReceipts,
+                  onChanged: (v) async {
+                    await auth.setReadReceipts(v);
+                    await HapticService.selection();
+                  },
+                ),
+                const Divider(),
+
+                // ---------- Appearance ----------
+                _SectionHeader('Appearance'),
+                ListTile(
+                  leading: const Icon(Icons.palette),
+                  title: const Text('Theme'),
+                  trailing: DropdownButton<AppThemeMode>(
+                    value: theme.mode,
+                    items: const [
+                      DropdownMenuItem(
+                          value: AppThemeMode.system, child: Text('System')),
+                      DropdownMenuItem(
+                          value: AppThemeMode.light, child: Text('Light')),
+                      DropdownMenuItem(
+                          value: AppThemeMode.dark, child: Text('Dark')),
+                    ],
+                    onChanged: (m) async {
+                      if (m != null) await theme.setMode(m);
+                    },
+                  ),
+                ),
+                const Divider(),
+
+                // ---------- Identities ----------
+                _SectionHeader('Identities on this device'),
                 for (final e in _all)
                   ListTile(
                     leading: Icon(e.isActive ? Icons.check_circle : Icons.circle_outlined,
-                        color: e.isActive ? Colors.green : Colors.white38),
+                        color: e.isActive ? Colors.green : Colors.grey),
                     title: Text('#${e.displayCode}'),
                     subtitle: Text(e.id.substring(0, 16)),
                     onTap: e.isActive ? null : () => _switchTo(e.id),
@@ -139,8 +193,63 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     minimumSize: const Size.fromHeight(52),
                   ),
                 ),
+                const SizedBox(height: 32),
+                const Center(
+                  child: Text('Send v1.0 · Anonymous E2EE Chat',
+                      style: TextStyle(color: Colors.grey, fontSize: 12)),
+                ),
               ],
             ),
+    );
+  }
+
+  Future<void> _showDisappearingPicker(AuthService auth) async {
+    final selected = await showDialog<int>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('Default disappearing time'),
+        children: DisappearingConfig.presets.map((p) {
+          return SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, p.seconds),
+            child: Row(
+              children: [
+                if (auth.disappearingDefault == p.seconds)
+                  const Icon(Icons.check, color: Colors.green)
+                else
+                  const SizedBox(width: 24),
+                const SizedBox(width: 8),
+                Text(p.label),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+    if (selected != null) {
+      await auth.setDisappearingDefault(selected);
+    }
+  }
+
+  String _formatDuration(int seconds) {
+    if (seconds < 3600) return '$seconds s';
+    if (seconds < 86400) return '${seconds ~/ 3600} h';
+    if (seconds < 604800) return '${seconds ~/ 86400} d';
+    return '${seconds ~/ 604800} w';
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String text;
+  const _SectionHeader(this.text);
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 16, 0, 8),
+      child: Text(text,
+          style: TextStyle(
+              color: Theme.of(context).colorScheme.secondary,
+              fontWeight: FontWeight.w600,
+              fontSize: 13)),
     );
   }
 }

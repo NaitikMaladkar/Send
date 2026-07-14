@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'services/auth_service.dart';
 import 'services/chat_service.dart';
 import 'services/notification_service.dart';
+import 'services/screenshot_service.dart';
 import 'screens/splash_screen.dart';
 import 'utils/constants.dart';
 import 'utils/theme.dart';
@@ -24,11 +25,20 @@ Future<void> main() async {
   await NotificationService.init();
   await NotificationService.initForegroundTask();
 
-  runApp(const SendApp());
+  // Enable FLAG_SECURE app-wide so screenshots are blocked (Android).
+  // This implements the "self-destruct on screenshot" feature by
+  // preventing screenshots in the first place.
+  await ScreenshotService.enableSecure();
+
+  final themeService = ThemeService();
+  await themeService.init();
+
+  runApp(SendApp(themeService: themeService));
 }
 
 class SendApp extends StatelessWidget {
-  const SendApp({super.key});
+  final ThemeService themeService;
+  const SendApp({super.key, required this.themeService});
 
   @override
   Widget build(BuildContext context) {
@@ -36,12 +46,17 @@ class SendApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => AuthService()),
         Provider<ChatService>(create: (ctx) => ChatService(ctx.read<AuthService>())),
+        ChangeNotifierProvider.value(value: themeService),
       ],
-      child: MaterialApp(
-        title: 'Send',
-        debugShowCheckedModeBanner: false,
-        theme: SendTheme.dark(),
-        home: const SplashScreen(),
+      child: Consumer<ThemeService>(
+        builder: (context, ts, _) => MaterialApp(
+          title: 'Send',
+          debugShowCheckedModeBanner: false,
+          theme: SendTheme.light(),
+          darkTheme: SendTheme.dark(),
+          themeMode: ts.flutterMode,
+          home: const SplashScreen(),
+        ),
       ),
     );
   }

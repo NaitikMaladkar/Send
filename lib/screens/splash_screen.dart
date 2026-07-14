@@ -35,13 +35,13 @@ class _SplashScreenState extends State<SplashScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.lock, size: 72, color: Theme.of(context).colorScheme.primary),
+            Icon(Icons.bolt, size: 80, color: Theme.of(context).colorScheme.primary),
             const SizedBox(height: 16),
             const Text('Send',
                 style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
-            const Text('Anonymous · End-to-end encrypted',
-                style: TextStyle(color: Colors.white54)),
+            Text('Anonymous · End-to-end encrypted',
+                style: TextStyle(color: Theme.of(context).hintColor)),
             const SizedBox(height: 24),
             const CircularProgressIndicator(strokeWidth: 2),
           ],

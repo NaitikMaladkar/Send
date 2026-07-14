@@ -33,7 +33,7 @@ class _HomeScreenState extends State<HomeScreen> {
         index: _index,
         children: [
           const ChatsTab(),
-          const FriendsTab(),
+          FriendsTab(),
         ],
       ),
       bottomNavigationBar: NavigationBar(

@@ -5,10 +5,13 @@ import 'package:provider/provider.dart';
 
 import '../models/friend.dart';
 import '../services/auth_service.dart';
+import '../services/haptic_service.dart';
 import '../services/supabase_backend.dart';
+import '../widgets/empty_state.dart';
 import 'add_friend_screen.dart';
+import 'create_group_screen.dart';
 
-/// Lists friends + pending friend requests; tap "+" to add via code.
+/// Lists friends + pending friend requests; tap "+" to add via code or QR.
 class FriendsTab extends StatefulWidget {
   const FriendsTab({super.key});
   @override
@@ -46,9 +49,7 @@ class _FriendsTabState extends State<FriendsTab> {
     final peerId = row['from_identity'] as String;
     try {
       await SupabaseBackend.respondFriendRequest(row['id'] as String, true);
-      // Fetch peer's public key so we can encrypt messages to them.
       final pub = await SupabaseBackend.fetchIdentityPublicKey(peerId);
-      // Skip if already added (idempotent)
       if (auth.friend(peerId) == null) {
         await auth.addFriend(Friend(
           identityId: peerId,
@@ -57,6 +58,7 @@ class _FriendsTabState extends State<FriendsTab> {
           friendedAt: DateTime.now(),
         ));
       }
+      await HapticService.medium();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Friend added — you can chat now')),
@@ -65,18 +67,72 @@ class _FriendsTabState extends State<FriendsTab> {
       await _refresh();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Failed: $e')));
       }
     }
   }
 
   Future<void> _reject(Map<String, dynamic> row) async {
     try {
-      await SupabaseBackend.respondFriendRequest(
-          row['id'] as String, false);
+      await SupabaseBackend.respondFriendRequest(row['id'] as String, false);
       await _refresh();
     } catch (_) {}
+  }
+
+  void _onLongPressFriend(Friend f) async {
+    HapticService.longPress();
+    final auth = context.read<AuthService>();
+    final ctrl = TextEditingController(text: f.alias ?? '');
+    await showDialog<void>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: Text(f.alias ?? f.identityId.substring(0, 8)),
+        children: [
+          SimpleDialogOption(
+            child: const Text('Edit alias'),
+            onPressed: () async {
+              Navigator.pop(context);
+              final r = await showDialog<String>(
+                context: context,
+                builder: (_) => AlertDialog(
+                  title: const Text('Set alias'),
+                  content: TextField(
+                    controller: ctrl,
+                    decoration: const InputDecoration(hintText: 'e.g. Alice'),
+                    maxLength: 50,
+                  ),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(context, null),
+                        child: const Text('Cancel')),
+                    TextButton(
+                        onPressed: () =>
+                            Navigator.pop(context, ctrl.text.trim()),
+                        child: const Text('Save')),
+                  ],
+                ),
+              );
+              if (r != null) {
+                await auth.updateFriend(
+                    f.copyWith(alias: r.isEmpty ? null : r));
+              }
+            },
+          ),
+          SimpleDialogOption(
+            child: const Text('Disappearing messages'),
+            onPressed: () async {
+              Navigator.pop(context);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text(
+                        'Open a chat → ⋮ menu → Disappearing to set per-friend TTL')));
+              }
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -84,71 +140,96 @@ class _FriendsTabState extends State<FriendsTab> {
     final auth = context.watch<AuthService>();
     final friends = auth.friends;
     return Scaffold(
-      floatingActionButton: FloatingActionButton.extended(
-        icon: const Icon(Icons.add),
-        label: const Text('Add friend'),
-        onPressed: () => Navigator.of(context)
-            .push(MaterialPageRoute(builder: (_) => const AddFriendScreen())),
-      ),
-      body: ListView(
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          if (_pending.isNotEmpty) ...[
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text('Incoming requests',
-                  style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w600)),
-            ),
-            for (final row in _pending)
-              ListTile(
-                leading: const CircleAvatar(child: Icon(Icons.person)),
-                title: Text('From ${(row['from_identity'] as String).substring(0, 8)}…'),
-                subtitle: Text(row['intro'] as String? ?? ''),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.check, color: Colors.green),
-                      onPressed: () => _accept(row),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.redAccent),
-                      onPressed: () => _reject(row),
-                    ),
-                  ],
-                ),
-              ),
-            const Divider(),
-          ],
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Your friends (${friends.length})',
-                style: const TextStyle(color: Colors.white54, fontWeight: FontWeight.w600)),
+          FloatingActionButton.small(
+            heroTag: 'fab-group',
+            tooltip: 'New group chat',
+            onPressed: () {
+              if (friends.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('Add a friend first to create a group')));
+                return;
+              }
+              Navigator.of(context)
+                  .push(MaterialPageRoute(builder: (_) => const CreateGroupScreen()));
+            },
+            child: const Icon(Icons.group_add),
           ),
-          if (friends.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(32),
-              child: Center(
-                child: Text('No friends yet. Tap "Add friend" to share your code.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white38)),
-              ),
-            )
-          else
-            for (final f in friends)
-              ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: Theme.of(context).colorScheme.primary,
-                  child: Text(
-                    (f.alias?.isNotEmpty ?? false) ? f.alias![0].toUpperCase() : '#',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                ),
-                title: Text(f.alias ?? f.identityId.substring(0, 8)),
-                subtitle: Text('ID: ${f.identityId.substring(0, 16)}…',
-                    style: const TextStyle(fontSize: 12, color: Colors.white38)),
-              ),
+          const SizedBox(height: 8),
+          FloatingActionButton.extended(
+            heroTag: 'fab-add',
+            icon: const Icon(Icons.add),
+            label: const Text('Add friend'),
+            onPressed: () => Navigator.of(context)
+                .push(MaterialPageRoute(builder: (_) => const AddFriendScreen())),
+          ),
         ],
       ),
+      body: friends.isEmpty && _pending.isEmpty
+          ? EmptyState(
+              icon: Icons.person_add_outlined,
+              title: 'No friends yet',
+              subtitle:
+                  'Share your rotating code or QR code with someone.\nThey paste it on their end to send you a friend request.',
+              actionLabel: 'Add a friend',
+              onAction: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const AddFriendScreen())),
+            )
+          : ListView(
+              children: [
+                if (_pending.isNotEmpty) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                    child: Text('Incoming requests',
+                        style: Theme.of(context).textTheme.labelMedium),
+                  ),
+                  for (final row in _pending)
+                    ListTile(
+                      leading: const CircleAvatar(child: Icon(Icons.person)),
+                      title: Text(
+                          'From ${(row['from_identity'] as String).substring(0, 8)}…'),
+                      subtitle: Text(row['intro'] as String? ?? ''),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.check, color: Colors.green),
+                            onPressed: () => _accept(row),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.redAccent),
+                            onPressed: () => _reject(row),
+                          ),
+                        ],
+                      ),
+                    ),
+                  const Divider(),
+                ],
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                  child: Text('Your friends (${friends.length})',
+                      style: Theme.of(context).textTheme.labelMedium),
+                ),
+                for (final f in friends)
+                  ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: Theme.of(context).colorScheme.primary,
+                      child: Text(
+                        (f.alias?.isNotEmpty ?? false)
+                            ? f.alias![0].toUpperCase()
+                            : '#',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                    title: Text(f.alias ?? f.identityId.substring(0, 8)),
+                    subtitle: Text('ID: ${f.identityId.substring(0, 16)}…',
+                        style: const TextStyle(fontSize: 12)),
+                    onLongPress: () => _onLongPressFriend(f),
+                  ),
+              ],
+            ),
     );
   }
 }

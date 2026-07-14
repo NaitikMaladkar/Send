@@ -1,4 +1,4 @@
-enum MessageKind { text, image, pdf, voice }
+enum MessageKind { text, image, pdf, voice, system }
 
 extension MessageKindX on MessageKind {
   String get wire => switch (this) {
@@ -6,6 +6,7 @@ extension MessageKindX on MessageKind {
         MessageKind.image => 'image',
         MessageKind.pdf => 'pdf',
         MessageKind.voice => 'voice',
+        MessageKind.system => 'system',
       };
 
   static MessageKind fromWire(String s) => switch (s) {
@@ -13,6 +14,7 @@ extension MessageKindX on MessageKind {
         'image' => MessageKind.image,
         'pdf' => MessageKind.pdf,
         'voice' => MessageKind.voice,
+        'system' => MessageKind.system,
         _ => MessageKind.text,
       };
 }
@@ -29,6 +31,16 @@ class Message {
   final DateTime? deliveredAt;
   final DateTime? readAt;
 
+  /// True if sender deleted this message for everyone (ciphertext wiped).
+  final bool deletedForEveryone;
+  final String? deletedByIdentity;
+
+  /// Group id if this message belongs to a group chat (else null).
+  final String? groupId;
+
+  /// Disappearing TTL in seconds (used for the countdown UI).
+  final int? ttlSeconds;
+
   const Message({
     required this.id,
     required this.fromIdentity,
@@ -39,7 +51,32 @@ class Message {
     required this.createdAt,
     this.deliveredAt,
     this.readAt,
+    this.deletedForEveryone = false,
+    this.deletedByIdentity,
+    this.groupId,
+    this.ttlSeconds,
   });
 
-  bool get isMine => false; // set by chat controller
+  Message copyWith({
+    String? plaintext,
+    DateTime? deliveredAt,
+    DateTime? readAt,
+    bool? deletedForEveryone,
+    String? deletedByIdentity,
+  }) =>
+      Message(
+        id: id,
+        fromIdentity: fromIdentity,
+        toIdentity: toIdentity,
+        plaintext: plaintext ?? this.plaintext,
+        kind: kind,
+        attachmentPath: attachmentPath,
+        createdAt: createdAt,
+        deliveredAt: deliveredAt ?? this.deliveredAt,
+        readAt: readAt ?? this.readAt,
+        deletedForEveryone: deletedForEveryone ?? this.deletedForEveryone,
+        deletedByIdentity: deletedByIdentity ?? this.deletedByIdentity,
+        groupId: groupId,
+        ttlSeconds: ttlSeconds,
+      );
 }

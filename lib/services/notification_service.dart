@@ -1,7 +1,5 @@
 import 'dart:io';
 
-// Hide the duplicate NotificationVisibility from flutter_foreground_task so
-// the one exported by flutter_local_notifications is the one we use.
 import 'package:flutter_foreground_task/flutter_foreground_task.dart'
     hide NotificationVisibility;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -24,7 +22,6 @@ class NotificationService {
     );
     await _local.initialize(init);
 
-    // Create a high-importance channel for chat notifications
     const channel = AndroidNotificationChannel(
       'send.messages',
       'Send · Messages',
@@ -87,9 +84,7 @@ class NotificationService {
     );
   }
 
-  /// Initialize the foreground-task subsystem (must be called before
-  /// [startForeground]). The service itself is started by the host app
-  /// via `FlutterForegroundTask.startService()`.
+  /// Initialize the foreground-task subsystem.
   static Future<void> initForegroundTask() async {
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
@@ -107,7 +102,6 @@ class NotificationService {
     );
   }
 
-  /// Start the foreground service so Android keeps the Dart isolate alive.
   static Future<void> startForeground() async {
     if (Platform.isAndroid) {
       await FlutterForegroundTask.startService(
