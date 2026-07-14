@@ -1,0 +1,51 @@
+# ---- secrets & signing (NEVER commit) ----
+android/key.properties
+android/app/send-keystore.jks
+android/app/google-services.json
+**/*.keystore
+**/*.jks
+**/service_account_key.json
+**/service-role*.key
+
+# ---- env / credentials ----
+.env
+.env.*
+**/secrets.json
+
+# ---- Flutter / Dart ----
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+.dart_tool/
+**/generated_plugin_registrant.dart
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# ---- Android ----
+android/.gradle/
+android/local.properties
+android/app/debug/
+android/app/profile/
+android/app/release/
+*.apk
+*.aab
+*.ap_
+
+# ---- iOS (not built, but kept for reference) ----
+ios/Pods/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+
+# ---- misc ----
+*.log
+*.pid
