@@ -40,13 +40,17 @@ class _ChatScreenState extends State<ChatScreen> {
     final auth = context.read<AuthService>();
     final chat = context.read<ChatService>();
     final id = auth.active!.id;
+    final peerId = widget.friend.identityId;
 
-    // Initial backfill
+    // Initial backfill — fetch all inbox then filter to THIS peer
+    // (server doesn't yet support per-peer fetch; future RPC could).
     try {
       final rows = await SupabaseBackend.fetchInbox(null);
       for (final row in rows) {
-        if (row['from_identity'] != widget.friend.identityId &&
-            row['to_identity'] != widget.friend.identityId) continue;
+        final from = row['from_identity'] as String;
+        final to = row['to_identity'] as String;
+        // Show messages FROM this peer TO me, OR FROM me TO this peer.
+        if (from != peerId && to != peerId) continue;
         try {
           final m = await chat.decryptRow(row);
           _messages.add(m);
@@ -60,26 +64,30 @@ class _ChatScreenState extends State<ChatScreen> {
     _channel = SupabaseBackend.subscribeMessages(
       identityId: id,
       onInsert: (row) async {
-        if (row['from_identity'] != widget.friend.identityId) return;
+        if (row['from_identity'] != peerId) return;
         try {
           final m = await chat.decryptRow(row);
+          // Dedup
+          if (_messages.any((e) => e.id == m.id)) return;
           _messages.add(m);
           _messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
           await SupabaseBackend.markRead(m.id);
           if (mounted) setState(() {});
-          _scroll.animateTo(0,
-              duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+          if (_scroll.hasClients) {
+            _scroll.animateTo(0,
+                duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+          }
         } catch (_) {}
       },
     );
 
-    // Fallback poll in case Realtime misses (every 20s)
-    _poll = Timer.periodic(const Duration(seconds: 20), (_) async {
+    // Fallback poll in case Realtime misses (every 15s)
+    _poll = Timer.periodic(const Duration(seconds: 15), (_) async {
       try {
-        final rows = await SupabaseBackend.fetchInbox(
-            _messages.isEmpty ? null : _messages.last.createdAt);
+        final since = _messages.isEmpty ? null : _messages.last.createdAt;
+        final rows = await SupabaseBackend.fetchInbox(since);
         for (final row in rows) {
-          if (row['from_identity'] != widget.friend.identityId) continue;
+          if (row['from_identity'] != peerId) continue;
           try {
             final m = await chat.decryptRow(row);
             if (_messages.any((e) => e.id == m.id)) continue;

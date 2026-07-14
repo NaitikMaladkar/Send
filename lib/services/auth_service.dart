@@ -84,16 +84,22 @@ class AuthService extends ChangeNotifier {
   }
 
   /// Get a cached shared symmetric key (or derive + cache it).
+  ///
+  /// The HKDF info string MUST be SYMMETRIC in (myId, peerId) — i.e. both
+  /// sides derive the same key. We lexically order the two ids and join them,
+  /// so it doesn't matter who is "me" and who is "peer".
   Future<Uint8List> sharedKeyWith(String peerId, Uint8List peerPublicKey) async {
     if (_active == null) throw StateError('no active identity');
     final cached = await SendKeystore.sharedKey(_active!.id, peerId);
     if (cached != null) return hexDecode(cached);
 
     final kp = await SendCrypto.importPrivate(_active!.privateKey);
+    // Symmetric info: order the two ids lexicographically.
+    final ids = [_active!.id, peerId]..sort();
     final derived = await SendCrypto.deriveSharedKey(
       myPrivate: kp,
       theirPublic: peerPublicKey,
-      info: 'send:v1:${_active!.id}.$peerId',
+      info: 'send:v1:${ids[0]}.${ids[1]}',
     );
     await SendKeystore.setSharedKey(_active!.id, peerId, hexEncode(derived));
     return derived;

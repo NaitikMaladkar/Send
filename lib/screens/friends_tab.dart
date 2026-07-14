@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/friend.dart';
 import '../services/auth_service.dart';
 import '../services/supabase_backend.dart';
 import 'add_friend_screen.dart';
@@ -41,14 +42,26 @@ class _FriendsTabState extends State<FriendsTab> {
   }
 
   Future<void> _accept(Map<String, dynamic> row) async {
+    final auth = context.read<AuthService>();
+    final peerId = row['from_identity'] as String;
     try {
-      await SupabaseBackend.respondFriendRequest(
-          row['id'] as String, true);
-      // Cache the friend. We don't have their pubkey from this row, so for v1
-      // we leave it empty — they'll be added on first incoming message via
-      // the unknown-peer fallback. For a polished v1.1, we'd fetch their
-      // public_key via a new RPC `fetch_identity_public_key(uuid)`.
-      // For now: prompt user to swap codes for proper E2EE.
+      await SupabaseBackend.respondFriendRequest(row['id'] as String, true);
+      // Fetch peer's public key so we can encrypt messages to them.
+      final pub = await SupabaseBackend.fetchIdentityPublicKey(peerId);
+      // Skip if already added (idempotent)
+      if (auth.friend(peerId) == null) {
+        await auth.addFriend(Friend(
+          identityId: peerId,
+          publicKey: pub.toList(),
+          alias: null,
+          friendedAt: DateTime.now(),
+        ));
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Friend added — you can chat now')),
+        );
+      }
       await _refresh();
     } catch (e) {
       if (mounted) {

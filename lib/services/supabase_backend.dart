@@ -104,6 +104,52 @@ class SupabaseBackend {
     return (res as List).map((e) => (e as Map)['identity_id'] as String).toList();
   }
 
+  /// Fetch the public key of any identity (used after accepting a friend
+  /// request to cache the peer's pubkey locally).
+  static Future<Uint8List> fetchIdentityPublicKey(String identityId) async {
+    final res = await _client.rpc(
+      'fetch_identity_public_key',
+      params: {'p_identity_id': identityId},
+    );
+    // PostgREST returns bytea as either a base64 string, a hex string with
+    // \x prefix, or a JSON object {type:Buffer, data:[..]}.
+    if (res is String) {
+      if (res.startsWith(r'\x')) {
+        // Hex-encoded ASCII of the base64 string (legacy mode)
+        final ascii = String.fromCharCodes(
+          List<int>.generate((res.length - 2) ~/ 2, (i) {
+            final hex = res.substring(2 + i * 2, 2 + i * 2 + 2);
+            return int.parse(hex, radix: 16);
+          }),
+        );
+        return base64Decode(ascii);
+      }
+      try {
+        return base64Decode(res);
+      } catch (_) {
+        return Uint8List.fromList(
+          List<int>.generate(res.length ~/ 2, (i) {
+            return int.parse(res.substring(i * 2, i * 2 + 2), radix: 16);
+          }),
+        );
+      }
+    }
+    if (res is Map && res['data'] is List) {
+      return Uint8List.fromList(List<int>.from(res['data']));
+    }
+    if (res is List) {
+      return Uint8List.fromList(List<int>.from(res));
+    }
+    throw StateError('unexpected public_key response: $res');
+  }
+
+  /// Fetch outgoing friend requests (so the sender can detect when their
+  /// request was accepted and add the peer locally).
+  static Future<List<Map<String, dynamic>>> fetchOutgoingFriendRequests() async {
+    final res = await _client.rpc('fetch_outgoing_friend_requests');
+    return (res as List).cast<Map<String, dynamic>>();
+  }
+
   // ---------- messages ----------
 
   /// Send an encrypted message. `ciphertext` is AES-256-GCM output (with tag appended).

@@ -52,9 +52,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      floatingActionButton: _index == 0
-          ? null
-          : null,
     );
   }
 }

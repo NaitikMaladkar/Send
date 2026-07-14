@@ -79,8 +79,8 @@ class ChatService {
     }
     final key = await _auth.sharedKeyWith(fromId, Uint8List.fromList(peer.publicKey));
 
-    final ciphertext = Uint8List.fromList(base64Decode(row['ciphertext'] as String));
-    final iv = Uint8List.fromList(base64Decode(row['iv'] as String));
+    final ciphertext = _parseBytea(row['ciphertext']);
+    final iv = _parseBytea(row['iv']);
     final plaintext = await SendCrypto.decrypt(key: key, ciphertext: ciphertext, iv: iv);
 
     String text;
@@ -111,6 +111,34 @@ class ChatService {
           ? null
           : DateTime.parse(row['read_at'] as String).toLocal(),
     );
+  }
+
+  /// PostgREST returns `bytea` columns in different shapes depending on the
+  /// Accept / arrayheader configuration. Handle them all.
+  static Uint8List _parseBytea(dynamic v) {
+    if (v is Uint8List) return v;
+    if (v is List) return Uint8List.fromList(List<int>.from(v));
+    if (v is String) {
+      // Realtime payloads arrive as base64 string
+      try {
+        return base64Decode(v);
+      } catch (_) {
+        // Could be \x hex
+        if (v.startsWith(r'\x')) {
+          final hex = v.substring(2);
+          return Uint8List.fromList(
+            List<int>.generate(hex.length ~/ 2, (i) {
+              return int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+            }),
+          );
+        }
+        rethrow;
+      }
+    }
+    if (v is Map && v['data'] is List) {
+      return Uint8List.fromList(List<int>.from(v['data']));
+    }
+    throw StateError('cannot parse bytea: $v (${v.runtimeType})');
   }
 
   /// Download + decrypt an attachment's bytes for in-app viewing.

@@ -48,11 +48,11 @@ class NotificationService {
         ?.createNotificationChannel(frChannel);
   }
 
-  static Future<void> showIncomingMessage() async {
+  static Future<void> showIncomingMessage({String? preview}) async {
     await _local.show(
       DateTime.now().millisecondsSinceEpoch % 0x7fffffff,
-      'Send',
-      'New encrypted message',
+      'Send · New message',
+      preview ?? 'Tap to view',
       const NotificationDetails(
         android: AndroidNotificationDetails(
           'send.messages',
@@ -61,19 +61,20 @@ class NotificationService {
           importance: Importance.high,
           icon: '@mipmap/ic_launcher',
           category: AndroidNotificationCategory.message,
-          // Use the enum value qualified via the library prefix to dodge the
-          // name clash with flutter_foreground_task.NotificationVisibility.
           visibility: NotificationVisibility.private,
         ),
       ),
     );
   }
 
-  static Future<void> showFriendRequest() async {
+  static Future<void> showFriendRequest({String? fromId}) async {
+    final body = fromId != null
+        ? 'From ${fromId.substring(0, 8)}…'
+        : 'New friend request';
     await _local.show(
       DateTime.now().millisecondsSinceEpoch % 0x7fffffff,
-      'Send',
-      'New friend request',
+      'Send · Friend request',
+      body,
       const NotificationDetails(
         android: AndroidNotificationDetails(
           'send.friends',

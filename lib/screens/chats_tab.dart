@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../models/friend.dart';
 import '../models/message.dart';
 import '../services/auth_service.dart';
 import '../services/chat_service.dart';
@@ -59,12 +60,15 @@ class _ChatsTabState extends State<ChatsTab> {
           _lastTime[peerId] = m.createdAt;
           // mark delivered
           await SupabaseBackend.markDelivered(m.id);
+          // Notify (no plaintext in notification body for privacy)
+          await NotificationService.showIncomingMessage(
+            preview: m.kind == MessageKind.text ? 'Encrypted message' : 'Attachment',
+          );
         } catch (_) {
           _lastMessage[peerId] = 'New encrypted message';
           _lastTime[peerId] = DateTime.now();
+          await NotificationService.showIncomingMessage();
         }
-        // Notify
-        await NotificationService.showIncomingMessage();
         if (mounted) setState(() {});
       },
     );
@@ -73,7 +77,8 @@ class _ChatsTabState extends State<ChatsTab> {
     _frChannel = SupabaseBackend.subscribeFriendRequests(
       identityId: id,
       onInsert: (row) async {
-        await NotificationService.showFriendRequest();
+        final fromId = row['from_identity'] as String;
+        await NotificationService.showFriendRequest(fromId: fromId);
         if (mounted) setState(() {});
       },
     );
@@ -85,19 +90,48 @@ class _ChatsTabState extends State<ChatsTab> {
         final status = row['status'] as String;
         final otherId = row['to_identity'] as String;
         if (status == 'accepted') {
-          // Need to fetch the other side's public key — for v1, we already
-          // have it cached from when we resolved the code.
+          // If we don't have this friend cached yet, fetch their pubkey
+          // and add them. This handles the case where the OTHER side accepted
+          // our request — we need their pubkey to encrypt to them.
           if (auth.friend(otherId) == null) {
-            // Pull the public key by re-issuing a fetch_friend_requests
-            // (the to_identity of OUR outgoing accepted request)
-            // For v1, we use the cached value from AddFriendScreen.
-            // The ChatService doesn't currently have a way to look this up
-            // directly from server, so we rely on the user adding the friend
-            // from AddFriendScreen which already cached the pubkey.
+            try {
+              final pub = await SupabaseBackend.fetchIdentityPublicKey(otherId);
+              await auth.addFriend(Friend(
+                identityId: otherId,
+                publicKey: pub.toList(),
+                alias: null,
+                friendedAt: DateTime.now(),
+              ));
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Your friend request was accepted')),
+                );
+              }
+            } catch (_) {}
           }
         }
       },
     );
+
+    // One-shot poll for any outgoing requests that were accepted while we
+    // were offline (Realtime only fires for live UPDATEs, not past state).
+    try {
+      final outgoing = await SupabaseBackend.fetchOutgoingFriendRequests();
+      for (final row in outgoing) {
+        if (row['status'] != 'accepted') continue;
+        final otherId = row['to_identity'] as String;
+        if (auth.friend(otherId) != null) continue;
+        try {
+          final pub = await SupabaseBackend.fetchIdentityPublicKey(otherId);
+          await auth.addFriend(Friend(
+            identityId: otherId,
+            publicKey: pub.toList(),
+            alias: null,
+            friendedAt: DateTime.now(),
+          ));
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
   @override
