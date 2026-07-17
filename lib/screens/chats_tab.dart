@@ -12,6 +12,7 @@ import '../services/haptic_service.dart';
 import '../services/notification_service.dart';
 import '../services/supabase_backend.dart';
 import '../widgets/empty_state.dart';
+import 'add_friend_screen.dart';
 import 'chat_screen.dart';
 import 'group_chat_screen.dart';
 
@@ -241,9 +242,14 @@ class _ChatsTabState extends State<ChatsTab> {
                       'Open the Friends tab to add someone via their code\nor QR code. All chats are end-to-end encrypted.',
                   actionLabel: 'Add a friend',
                   onAction: () {
-                    // Switch to Friends tab via the BottomNavigationBar.
-                    // We use a simple navigation: find the home Scaffold and
-                    // pop to root, then user taps Friends tab.
+                    // Switch to Friends tab by tapping the BottomNavigationBar.
+                    // We don't have direct access to HomeScreen's state here,
+                    // so we navigate to AddFriendScreen directly.
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const AddFriendScreen(),
+                      ),
+                    );
                   },
                 ),
               ],

@@ -6,32 +6,83 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../utils/constants.dart';
 
-/// Thin wrapper around Supabase client. All DB mutations go through
-/// SECURITY DEFINER RPCs that verify `X-Identity-Id` + `X-Identity-Token`
-/// headers (set on the underlying client via [setActiveIdentity]).
+/// Thin wrapper around Supabase. All DB mutations go through SECURITY DEFINER
+/// RPCs that verify `X-Identity-Id` + `X-Identity-Token` headers.
+///
+/// NOTE: supabase_flutter 2.x exposes `client.headers` as an **unmodifiable**
+/// map, so we cannot mutate it after init. Instead, we route all RPC + storage
+/// calls through direct HTTP via the PostgREST / Storage REST endpoints,
+/// attaching the identity headers per call. Realtime subscriptions are kept on
+/// the Supabase client (with per-channel headers via RealtimeChannelOptions).
 class SupabaseBackend {
   static SupabaseClient get _client => Supabase.instance.client;
 
-  /// Set the per-identity auth headers on the underlying client so all
-  /// subsequent RPCs are authenticated.
+  // ---------- per-identity auth state (in-memory) ----------
+
+  static String? _identityId;
+  static String? _authToken;
+
+  /// Set the per-identity auth headers used by all subsequent RPC + storage
+  /// calls. Stored in static fields because supabase_flutter 2.x's headers
+  /// map is unmodifiable.
   static void setActiveIdentity(String identityId, String authToken) {
-    _client.headers['X-Identity-Id'] = identityId;
-    _client.headers['X-Identity-Token'] = authToken;
+    _identityId = identityId;
+    _authToken = authToken;
   }
 
   static void clearActiveIdentity() {
-    _client.headers.remove('X-Identity-Id');
-    _client.headers.remove('X-Identity-Token');
+    _identityId = null;
+    _authToken = null;
+  }
+
+  /// Common headers attached to every direct-HTTP call.
+  static Map<String, String> get _commonHeaders => {
+        'apikey': SupabaseConfig.anonKey,
+        'Authorization': 'Bearer ${SupabaseConfig.anonKey}',
+        'Content-Type': 'application/json',
+        if (_identityId != null) 'X-Identity-Id': _identityId!,
+        if (_authToken != null) 'X-Identity-Token': _authToken!,
+      };
+
+  // NOTE: supabase_flutter 2.13.x's RealtimeChannelConfig does NOT support
+  // per-channel headers, so we cannot attach X-Identity-Id to the websocket
+  // subscription. RLS policies that check `request.header.x-identity-id`
+  // will therefore block row delivery over Realtime for our use case.
+  // To compensate, callers rely on short-interval polling (3–5s) of the
+  // fetch_inbox / fetch_thread / fetch_group_inbox / fetch_relay_inbox RPCs
+  // — which DO go through direct HTTP with identity headers attached.
+  // Realtime broadcast channels (used for typing indicators) work fine
+  // because broadcast does not pass through RLS.
+
+  // ---------- low-level HTTP helpers ----------
+
+  /// Invoke a PostgREST RPC function via direct HTTP, attaching identity
+  /// headers. Returns the parsed JSON body.
+  static Future<dynamic> _rpc(
+    String functionName, [
+    Map<String, dynamic>? params,
+  ]) async {
+    final uri = Uri.parse('${SupabaseConfig.url}/rest/v1/rpc/$functionName');
+    final res = await http.post(
+      uri,
+      headers: _commonHeaders,
+      body: params == null ? '{}' : jsonEncode(params),
+    );
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw StateError(
+          'RPC $functionName failed: ${res.statusCode} ${res.body}');
+    }
+    if (res.body.isEmpty) return null;
+    return jsonDecode(res.body);
   }
 
   // ---------- identity ----------
 
   static Future<({String id, String authToken, String displayCode})>
       registerIdentity(Uint8List publicKey) async {
-    final res = await _client.rpc(
-      'register_identity',
-      params: {'p_public_key': base64Encode(publicKey)},
-    );
+    final res = await _rpc('register_identity', {
+      'p_public_key': base64Encode(publicKey),
+    });
     final row = (res as List).first as Map<String, dynamic>;
     return (
       id: row['id'] as String,
@@ -43,64 +94,62 @@ class SupabaseBackend {
   // ---------- heartbeat ----------
 
   static Future<void> touchActive() async {
-    await _client.rpc('touch_active');
+    await _rpc('touch_active');
   }
 
   // ---------- codes ----------
 
   static Future<String> createRotatingCode(String? alias) async {
-    final res = await _client.rpc(
-      'create_rotating_code',
-      params: {'p_alias': alias},
-    );
+    final res = await _rpc('create_rotating_code', {'p_alias': alias});
     return res as String;
   }
 
   static Future<({String identityId, Uint8List publicKey})> resolveCode(
       String code) async {
-    final res = await _client.rpc(
-      'resolve_code',
-      params: {'p_code': code},
-    );
+    final res = await _rpc('resolve_code', {'p_code': code});
     final row = (res as List).first as Map<String, dynamic>;
     return (
       identityId: row['identity_id'] as String,
-      publicKey: Uint8List.fromList(base64Decode(row['public_key'] as String)),
+      publicKey:
+          Uint8List.fromList(base64Decode(row['public_key'] as String)),
     );
   }
 
   // ---------- friend requests ----------
 
-  static Future<String> sendFriendRequest(String toIdentity, String? intro) async {
-    final res = await _client.rpc(
-      'send_friend_request',
-      params: {'p_to_identity': toIdentity, 'p_intro': intro},
-    );
+  static Future<String> sendFriendRequest(
+      String toIdentity, String? intro) async {
+    final res = await _rpc('send_friend_request', {
+      'p_to_identity': toIdentity,
+      'p_intro': intro,
+    });
     return res as String;
   }
 
-  static Future<void> respondFriendRequest(String requestId, bool accept) async {
-    await _client.rpc(
-      'respond_friend_request',
-      params: {'p_request_id': requestId, 'p_accept': accept},
-    );
+  static Future<void> respondFriendRequest(
+      String requestId, bool accept) async {
+    await _rpc('respond_friend_request', {
+      'p_request_id': requestId,
+      'p_accept': accept,
+    });
   }
 
   static Future<List<Map<String, dynamic>>> fetchFriendRequests() async {
-    final res = await _client.rpc('fetch_friend_requests');
-    return (res as List).cast<Map<String, dynamic>>();
+    final res = await _rpc('fetch_friend_requests');
+    return _castRows(res);
   }
 
   static Future<List<String>> listFriends() async {
-    final res = await _client.rpc('list_friends');
-    return (res as List).map((e) => (e as Map)['identity_id'] as String).toList();
+    final res = await _rpc('list_friends');
+    return (res as List)
+        .map((e) => (e as Map)['identity_id'] as String)
+        .toList();
   }
 
   static Future<Uint8List> fetchIdentityPublicKey(String identityId) async {
-    final res = await _client.rpc(
-      'fetch_identity_public_key',
-      params: {'p_identity_id': identityId},
-    );
+    final res = await _rpc('fetch_identity_public_key', {
+      'p_identity_id': identityId,
+    });
     if (res is String) {
       if (res.startsWith(r'\x')) {
         final ascii = String.fromCharCodes(
@@ -130,9 +179,10 @@ class SupabaseBackend {
     throw StateError('unexpected public_key response: $res');
   }
 
-  static Future<List<Map<String, dynamic>>> fetchOutgoingFriendRequests() async {
-    final res = await _client.rpc('fetch_outgoing_friend_requests');
-    return (res as List).cast<Map<String, dynamic>>();
+  static Future<List<Map<String, dynamic>>>
+      fetchOutgoingFriendRequests() async {
+    final res = await _rpc('fetch_outgoing_friend_requests');
+    return _castRows(res);
   }
 
   // ---------- messages (1:1) ----------
@@ -145,60 +195,54 @@ class SupabaseBackend {
     String? attachmentPath,
     int? ttlSeconds,
   }) async {
-    final res = await _client.rpc(
-      'send_message',
-      params: {
-        'p_to_identity': toIdentity,
-        'p_ciphertext': base64Encode(ciphertext),
-        'p_iv': base64Encode(iv),
-        'p_kind': kind,
-        'p_attachment_path': attachmentPath,
-        'p_ttl_seconds': ttlSeconds,
-      },
-    );
+    final res = await _rpc('send_message', {
+      'p_to_identity': toIdentity,
+      'p_ciphertext': base64Encode(ciphertext),
+      'p_iv': base64Encode(iv),
+      'p_kind': kind,
+      'p_attachment_path': attachmentPath,
+      'p_ttl_seconds': ttlSeconds,
+    });
     return res as String;
   }
 
   static Future<void> markDelivered(String messageId) async {
-    await _client.rpc('mark_delivered', params: {'p_message_id': messageId});
+    await _rpc('mark_delivered', {'p_message_id': messageId});
   }
 
   static Future<void> markRead(String messageId) async {
-    await _client.rpc('mark_read', params: {'p_message_id': messageId});
+    await _rpc('mark_read', {'p_message_id': messageId});
   }
 
-  static Future<void> deleteMessage(String messageId, bool forEveryone) async {
-    await _client.rpc('delete_message', params: {
+  static Future<void> deleteMessage(
+      String messageId, bool forEveryone) async {
+    await _rpc('delete_message', {
       'p_message_id': messageId,
       'p_for_everyone': forEveryone,
     });
   }
 
   static Future<List<Map<String, dynamic>>> fetchInbox(DateTime? since) async {
-    final res = await _client.rpc(
-      'fetch_inbox',
-      params: {'p_since': since?.toUtc().toIso8601String()},
-    );
-    return (res as List).cast<Map<String, dynamic>>();
+    final res = await _rpc('fetch_inbox', {
+      'p_since': since?.toUtc().toIso8601String(),
+    });
+    return _castRows(res);
   }
 
   static Future<List<Map<String, dynamic>>> fetchThread(
       String peerId, DateTime? since) async {
-    final res = await _client.rpc(
-      'fetch_thread',
-      params: {
-        'p_peer': peerId,
-        'p_since': since?.toUtc().toIso8601String(),
-      },
-    );
-    return (res as List).cast<Map<String, dynamic>>();
+    final res = await _rpc('fetch_thread', {
+      'p_peer': peerId,
+      'p_since': since?.toUtc().toIso8601String(),
+    });
+    return _castRows(res);
   }
 
   // ---------- privacy settings ----------
 
   static Future<({int disappearingSeconds, bool readReceipts})>
       getPrivacySettings() async {
-    final res = await _client.rpc('get_privacy_settings');
+    final res = await _rpc('get_privacy_settings');
     final row = (res as List).first as Map<String, dynamic>;
     return (
       disappearingSeconds: row['disappearing_seconds'] as int,
@@ -207,32 +251,29 @@ class SupabaseBackend {
   }
 
   static Future<void> updateDisappearingDefault(int seconds) async {
-    await _client.rpc('update_disappearing_default', params: {'p_seconds': seconds});
+    await _rpc('update_disappearing_default', {'p_seconds': seconds});
   }
 
   static Future<void> setReadReceiptsEnabled(bool enabled) async {
-    await _client.rpc('set_read_receipts_enabled', params: {'p_enabled': enabled});
+    await _rpc('set_read_receipts_enabled', {'p_enabled': enabled});
   }
 
   static Future<bool> peerReadReceiptsEnabled(String peerId) async {
-    final res = await _client.rpc(
-      'peer_read_receipts_enabled',
-      params: {'p_peer': peerId},
-    );
+    final res = await _rpc('peer_read_receipts_enabled', {'p_peer': peerId});
     return res as bool;
   }
 
   // ---------- aliases ----------
 
   static Future<void> setFriendAlias(String peerId, String? alias) async {
-    await _client.rpc('set_friend_alias', params: {
+    await _rpc('set_friend_alias', {
       'p_peer': peerId,
       'p_alias': alias,
     });
   }
 
   static Future<Map<String, String?>> fetchFriendAliases() async {
-    final res = await _client.rpc('fetch_friend_aliases');
+    final res = await _rpc('fetch_friend_aliases');
     final out = <String, String?>{};
     for (final e in res as List) {
       final row = e as Map<String, dynamic>;
@@ -243,8 +284,9 @@ class SupabaseBackend {
 
   // ---------- group chats ----------
 
-  static Future<String> createGroup(String name, List<String> memberIds) async {
-    final res = await _client.rpc('create_group', params: {
+  static Future<String> createGroup(
+      String name, List<String> memberIds) async {
+    final res = await _rpc('create_group', {
       'p_name': name,
       'p_member_ids': memberIds,
     });
@@ -252,16 +294,14 @@ class SupabaseBackend {
   }
 
   static Future<List<Map<String, dynamic>>> listMyGroups() async {
-    final res = await _client.rpc('list_my_groups');
-    return (res as List).cast<Map<String, dynamic>>();
+    final res = await _rpc('list_my_groups');
+    return _castRows(res);
   }
 
   static Future<List<Map<String, dynamic>>> listGroupMembers(
       String groupId) async {
-    final res = await _client.rpc('list_group_members', params: {
-      'p_group_id': groupId,
-    });
-    return (res as List).cast<Map<String, dynamic>>();
+    final res = await _rpc('list_group_members', {'p_group_id': groupId});
+    return _castRows(res);
   }
 
   static Future<String> sendGroupMessage({
@@ -273,7 +313,7 @@ class SupabaseBackend {
     String? attachmentPath,
     int? ttlSeconds,
   }) async {
-    final res = await _client.rpc('send_group_message', params: {
+    final res = await _rpc('send_group_message', {
       'p_group_id': groupId,
       'p_recipients': recipients,
       'p_ciphertexts': ciphertexts.map(base64Encode).toList(),
@@ -285,16 +325,16 @@ class SupabaseBackend {
     return res as String;
   }
 
-  static Future<List<Map<String, dynamic>>> fetchGroupInbox(DateTime? since) async {
-    final res = await _client.rpc(
-      'fetch_group_inbox',
-      params: {'p_since': since?.toUtc().toIso8601String()},
-    );
-    return (res as List).cast<Map<String, dynamic>>();
+  static Future<List<Map<String, dynamic>>> fetchGroupInbox(
+      DateTime? since) async {
+    final res = await _rpc('fetch_group_inbox', {
+      'p_since': since?.toUtc().toIso8601String(),
+    });
+    return _castRows(res);
   }
 
   static Future<void> leaveGroup(String groupId) async {
-    await _client.rpc('leave_group', params: {'p_group_id': groupId});
+    await _rpc('leave_group', {'p_group_id': groupId});
   }
 
   // ---------- onion routing ----------
@@ -306,7 +346,7 @@ class SupabaseBackend {
     String? finalKind,
     String? finalAttachmentPath,
   }) async {
-    final res = await _client.rpc('relay_send', params: {
+    final res = await _rpc('relay_send', {
       'p_to_identity': toIdentity,
       'p_ciphertext': base64Encode(ciphertext),
       'p_iv': base64Encode(iv),
@@ -316,12 +356,12 @@ class SupabaseBackend {
     return res as String;
   }
 
-  static Future<List<Map<String, dynamic>>> fetchRelayInbox(DateTime? since) async {
-    final res = await _client.rpc(
-      'fetch_relay_inbox',
-      params: {'p_since': since?.toUtc().toIso8601String()},
-    );
-    return (res as List).cast<Map<String, dynamic>>();
+  static Future<List<Map<String, dynamic>>> fetchRelayInbox(
+      DateTime? since) async {
+    final res = await _rpc('fetch_relay_inbox', {
+      'p_since': since?.toUtc().toIso8601String(),
+    });
+    return _castRows(res);
   }
 
   static Future<String> relayDeliverFinal({
@@ -332,7 +372,7 @@ class SupabaseBackend {
     required String kind,
     String? attachmentPath,
   }) async {
-    final res = await _client.rpc('relay_deliver_final', params: {
+    final res = await _rpc('relay_deliver_final', {
       'p_to_identity': toIdentity,
       'p_from_identity': fromIdentity,
       'p_ciphertext': base64Encode(ciphertext),
@@ -344,11 +384,14 @@ class SupabaseBackend {
   }
 
   static Future<void> relayConsume(String hopId) async {
-    await _client.rpc('relay_consume', params: {'p_hop_id': hopId});
+    await _rpc('relay_consume', {'p_hop_id': hopId});
   }
 
   // ---------- storage (attachments) ----------
 
+  /// Upload an encrypted attachment via direct HTTP to the Storage REST API.
+  /// Identity headers are attached so the storage RLS policy can authorize
+  /// the upload.
   static Future<String> uploadAttachment({
     required String identityId,
     required String peerId,
@@ -357,22 +400,46 @@ class SupabaseBackend {
   }) async {
     final path =
         '${identityId}_${peerId}_${DateTime.now().millisecondsSinceEpoch}.$fileExt';
-    await _client.storage.from(SupabaseConfig.storageBucket).uploadBinary(
-          path,
-          encryptedBytes,
-          fileOptions: const FileOptions(
-            contentType: 'application/octet-stream',
-            upsert: false,
-          ),
-        );
+    final uri = Uri.parse(
+        '${SupabaseConfig.url}/storage/v1/object/${SupabaseConfig.storageBucket}/$path');
+    final res = await http.post(
+      uri,
+      headers: {
+        'apikey': SupabaseConfig.anonKey,
+        'Authorization': 'Bearer ${SupabaseConfig.anonKey}',
+        'Content-Type': 'application/octet-stream',
+        'x-upsert': 'false',
+        if (_identityId != null) 'X-Identity-Id': _identityId!,
+        if (_authToken != null) 'X-Identity-Token': _authToken!,
+      },
+      body: encryptedBytes,
+    );
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw StateError(
+          'Storage upload failed: ${res.statusCode} ${res.body}');
+    }
     return path;
   }
 
+  /// Download an encrypted attachment via direct HTTP.
   static Future<Uint8List> downloadAttachment(String path) async {
-    return _client.storage.from(SupabaseConfig.storageBucket).download(path);
+    final uri = Uri.parse(
+        '${SupabaseConfig.url}/storage/v1/object/${SupabaseConfig.storageBucket}/$path');
+    final res = await http.get(uri, headers: _commonHeaders);
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw StateError(
+          'Storage download failed: ${res.statusCode} ${res.body}');
+    }
+    return res.bodyBytes;
   }
 
   // ---------- Realtime subscriptions ----------
+
+  // All Realtime postgres_changes subscriptions below are kept as best-effort
+  // delivery channels — they MAY be filtered out by RLS because we cannot
+  // attach the X-Identity-Id header to the websocket subscription in
+  // supabase_flutter 2.13.x. The polling in chats_tab / chat_screen /
+  // group_chat_screen is the authoritative delivery path.
 
   static RealtimeChannel subscribeMessages({
     required String identityId,
@@ -389,7 +456,8 @@ class SupabaseBackend {
             column: 'to_identity',
             value: identityId,
           ),
-          callback: (payload) => onInsert(payload.newRecord),
+          callback: (payload) => onInsert(
+              Map<String, dynamic>.from(payload.newRecord)),
         )
         .subscribe();
   }
@@ -409,7 +477,8 @@ class SupabaseBackend {
             column: 'to_identity',
             value: identityId,
           ),
-          callback: (payload) => onInsert(payload.newRecord),
+          callback: (payload) => onInsert(
+              Map<String, dynamic>.from(payload.newRecord)),
         )
         .subscribe();
   }
@@ -429,7 +498,8 @@ class SupabaseBackend {
             column: 'to_identity',
             value: identityId,
           ),
-          callback: (payload) => onInsert(payload.newRecord),
+          callback: (payload) => onInsert(
+              Map<String, dynamic>.from(payload.newRecord)),
         )
         .subscribe();
   }
@@ -449,7 +519,8 @@ class SupabaseBackend {
             column: 'to_identity',
             value: identityId,
           ),
-          callback: (payload) => onInsert(payload.newRecord),
+          callback: (payload) => onInsert(
+              Map<String, dynamic>.from(payload.newRecord)),
         )
         .subscribe();
   }
@@ -469,7 +540,8 @@ class SupabaseBackend {
             column: 'from_identity',
             value: identityId,
           ),
-          callback: (payload) => onUpdate(payload.newRecord),
+          callback: (payload) => onUpdate(
+              Map<String, dynamic>.from(payload.newRecord)),
         )
         .subscribe();
   }
@@ -477,6 +549,8 @@ class SupabaseBackend {
   /// Subscribe to broadcast typing indicators on a per-peer channel.
   /// Both peers join the same channel (id = "typing:<sortedIds>").
   /// [onTyping] fires when the other peer broadcasts {'typing': true}.
+  /// Broadcast channels do not pass through RLS, so this works without
+  /// identity headers.
   static RealtimeChannel subscribeTyping({
     required String myId,
     required String peerId,
@@ -485,15 +559,15 @@ class SupabaseBackend {
     final ids = [myId, peerId]..sort();
     final chanId = 'typing:${ids[0]}.${ids[1]}';
     return _client.channel(chanId).onBroadcast(
-      event: 'typing',
-      callback: (payload) {
-        final from = payload['from'] as String?;
-        final t = payload['typing'] as bool?;
-        if (from != null && from != myId && t != null) {
-          onTyping(t);
-        }
-      },
-    ).subscribe();
+          event: 'typing',
+          callback: (payload) {
+            final from = payload['from'] as String?;
+            final t = payload['typing'] as bool?;
+            if (from != null && from != myId && t != null) {
+              onTyping(t);
+            }
+          },
+        ).subscribe();
   }
 
   static void broadcastTyping({
@@ -504,12 +578,27 @@ class SupabaseBackend {
     final ids = [myId, peerId]..sort();
     final chanId = 'typing:${ids[0]}.${ids[1]}';
     _client.channel(chanId).sendBroadcastMessage(
-      event: 'typing',
-      payload: {'from': myId, 'typing': typing},
-    );
+          event: 'typing',
+          payload: {'from': myId, 'typing': typing},
+        );
   }
 
-  // ---------- direct REST helper ----------
+  // ---------- helpers ----------
+
+  /// Cast a PostgREST RPC result (which is a JSON List) into a
+  /// List<Map<String, dynamic>>. Each row returned by PostgREST is a JSON
+  /// object; we wrap it in `Map<String, dynamic>.from(...)` so callers can
+  /// safely mutate / index it (the default Map view from jsonDecode is
+  /// actually modifiable, but copying is safer and avoids surprises).
+  static List<Map<String, dynamic>> _castRows(dynamic res) {
+    if (res == null) return const [];
+    if (res is! List) return const [];
+    return res
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList(growable: true);
+  }
+
+  // ---------- direct REST helper (kept for backwards compat) ----------
 
   static Future<http.Response> postWithHeaders(
     String path,

@@ -38,9 +38,13 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _poll;
   Timer? _relayPoll;
   Timer? _typingDebounce;
+  bool _typingDebounceActive = false;
   bool _sending = false;
   bool _peerTyping = false;
   Timer? _peerTypingTimer;
+  StreamSubscription? _playerCompleteSub;
+  StreamSubscription? _playerPositionSub;
+  String? _currentlyPlayingId;
 
   // Voice recording
   final _audioRecorder = AudioRecorder();
@@ -63,14 +67,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onInputChanged() {
     if (_input.text.isNotEmpty) {
-      // Throttle: only send typing=true every 2 seconds
-      if (_typingDebounce == null || !_typingDebounce!.isActive) {
+      // Throttle: only send typing=true every 2 seconds while user is typing
+      if (!_typingDebounceActive) {
+        _typingDebounceActive = true;
         SupabaseBackend.broadcastTyping(
           myId: context.read<AuthService>().active!.id,
           peerId: widget.friend.identityId,
           typing: true,
         );
-        _typingDebounce = Timer(const Duration(seconds: 2), () {});
+        _typingDebounce = Timer(const Duration(seconds: 2), () {
+          _typingDebounceActive = false;
+        });
       }
     }
   }
@@ -131,8 +138,11 @@ class _ChatScreenState extends State<ChatScreen> {
       },
     );
 
-    // Fallback poll in case Realtime misses (every 15s)
-    _poll = Timer.periodic(const Duration(seconds: 15), (_) async {
+    // Fallback poll in case Realtime misses (every 5s — Realtime may be
+    // filtered by RLS because we can't attach identity headers to the
+    // websocket subscription in supabase_flutter 2.13.x, so polling is the
+    // authoritative delivery path).
+    _poll = Timer.periodic(const Duration(seconds: 5), (_) async {
       try {
         final since = _messages.isEmpty ? null : _messages.last.createdAt;
         final rows = await SupabaseBackend.fetchThread(peerId, since);
@@ -188,6 +198,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _typingDebounce?.cancel();
     _peerTypingTimer?.cancel();
     _recordTimer?.cancel();
+    _playerCompleteSub?.cancel();
+    _playerPositionSub?.cancel();
     _input.removeListener(_onInputChanged);
     _input.dispose();
     _scroll.dispose();
@@ -352,23 +364,37 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _playVoice(Message m) async {
     if (m.attachmentPath == null) return;
+    // Stop any currently playing voice first
+    if (_currentlyPlayingId != null && _currentlyPlayingId != m.id) {
+      await _audioPlayer.stop();
+      if (mounted) {
+        setState(() {
+          _playingVoice[_currentlyPlayingId!] = false;
+          _voicePosition.remove(_currentlyPlayingId);
+        });
+      }
+    }
     try {
       final bytes = await context.read<ChatService>().downloadAttachment(m);
       final dir = await getTemporaryDirectory();
-      final file =
-          File('${dir.path}/voice_${m.id}.m4a');
+      final file = File('${dir.path}/voice_${m.id}.m4a');
       await file.writeAsBytes(bytes);
       await _audioPlayer.play(DeviceFileSource(file.path));
-      setState(() => _playingVoice[m.id] = true);
-      _audioPlayer.onPlayerComplete.listen((_) {
+      _currentlyPlayingId = m.id;
+      if (mounted) setState(() => _playingVoice[m.id] = true);
+      // Cancel previous subscriptions to prevent memory leaks / duplicate calls
+      await _playerCompleteSub?.cancel();
+      await _playerPositionSub?.cancel();
+      _playerCompleteSub = _audioPlayer.onPlayerComplete.listen((_) {
         if (mounted) {
           setState(() {
             _playingVoice[m.id] = false;
             _voicePosition.remove(m.id);
+            _currentlyPlayingId = null;
           });
         }
       });
-      _audioPlayer.onPositionChanged.listen((p) {
+      _playerPositionSub = _audioPlayer.onPositionChanged.listen((p) {
         if (mounted) {
           setState(() => _voicePosition[m.id] = p);
         }
@@ -385,7 +411,10 @@ class _ChatScreenState extends State<ChatScreen> {
     await _audioPlayer.stop();
     if (mounted) {
       setState(() {
-        _playingVoice.updateAll((k, v) => false);
+        if (_currentlyPlayingId != null) {
+          _playingVoice[_currentlyPlayingId!] = false;
+        }
+        _currentlyPlayingId = null;
       });
     }
   }

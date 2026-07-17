@@ -26,7 +26,7 @@ class _FriendsTabState extends State<FriendsTab> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
-    _poll = Timer.periodic(const Duration(seconds: 15), (_) => _refresh());
+    _poll = Timer.periodic(const Duration(seconds: 10), (_) => _refresh());
   }
 
   @override

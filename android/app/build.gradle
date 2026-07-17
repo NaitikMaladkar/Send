@@ -14,7 +14,6 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace = "io.send.secure"
     compileSdk = 36
-    ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -30,8 +29,8 @@ android {
         applicationId = "io.send.secure"
         minSdk = 26          // Android 8.0
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0"
         multiDexEnabled = true
     }
 

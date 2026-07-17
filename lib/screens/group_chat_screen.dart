@@ -70,7 +70,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       },
     );
 
-    _poll = Timer.periodic(const Duration(seconds: 15), (_) async {
+    _poll = Timer.periodic(const Duration(seconds: 5), (_) async {
       try {
         final since = _messages.isEmpty ? null : _messages.last.createdAt;
         final rows = await SupabaseBackend.fetchGroupInbox(since);
