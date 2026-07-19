@@ -110,9 +110,61 @@ class SupabaseBackend {
     final row = (res as List).first as Map<String, dynamic>;
     return (
       identityId: row['identity_id'] as String,
-      publicKey:
-          Uint8List.fromList(base64Decode(row['public_key'] as String)),
+      publicKey: parseBytea(row['public_key']),
     );
+  }
+
+  /// Parse a bytea value returned by PostgREST.
+  ///
+  /// PostgREST returns bytea columns as `\x<hex>` strings where `<hex>` is
+  /// the hex of the stored bytes. Because we send bytea RPC params as
+  /// base64-encoded strings (e.g. `base64Encode(pubKey)`), Postgres stores
+  /// the UTF-8 bytes of that base64 string, NOT the raw bytes. So to
+  /// recover the original raw bytes we need to:
+  ///   1. Strip the `\x` prefix
+  ///   2. Hex-decode to get the UTF-8 bytes
+  ///   3. Convert those bytes to a string (the base64 string we sent)
+  ///   4. Base64-decode that string to get the original raw bytes
+  ///
+  /// If the bytea was generated server-side (e.g. by `gen_random_bytes`),
+  /// step 4 will fail (it's not a valid base64 string) and we fall back to
+  /// returning the raw bytes directly.
+  static Uint8List parseBytea(dynamic v) {
+    if (v == null) return Uint8List(0);
+    if (v is Uint8List) return v;
+    if (v is List) return Uint8List.fromList(List<int>.from(v));
+    if (v is String) {
+      if (v.startsWith(r'\x')) {
+        final hex = v.substring(2);
+        final utf8Bytes = Uint8List.fromList(
+          List<int>.generate(hex.length ~/ 2, (i) {
+            return int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+          }),
+        );
+        // utf8Bytes is the UTF-8 of the base64 string we sent.
+        try {
+          final b64 = String.fromCharCodes(utf8Bytes);
+          return base64Decode(b64);
+        } catch (_) {
+          return utf8Bytes; // server-generated random bytes
+        }
+      }
+      // Try direct base64 first.
+      try {
+        return base64Decode(v);
+      } catch (_) {
+        // Fall back to plain hex.
+        return Uint8List.fromList(
+          List<int>.generate(v.length ~/ 2, (i) {
+            return int.parse(v.substring(i * 2, i * 2 + 2), radix: 16);
+          }),
+        );
+      }
+    }
+    if (v is Map && v['data'] is List) {
+      return Uint8List.fromList(List<int>.from(v['data']));
+    }
+    throw StateError('cannot parse bytea: $v (${v.runtimeType})');
   }
 
   // ---------- friend requests ----------
@@ -150,33 +202,7 @@ class SupabaseBackend {
     final res = await _rpc('fetch_identity_public_key', {
       'p_identity_id': identityId,
     });
-    if (res is String) {
-      if (res.startsWith(r'\x')) {
-        final ascii = String.fromCharCodes(
-          List<int>.generate((res.length - 2) ~/ 2, (i) {
-            final hex = res.substring(2 + i * 2, 2 + i * 2 + 2);
-            return int.parse(hex, radix: 16);
-          }),
-        );
-        return base64Decode(ascii);
-      }
-      try {
-        return base64Decode(res);
-      } catch (_) {
-        return Uint8List.fromList(
-          List<int>.generate(res.length ~/ 2, (i) {
-            return int.parse(res.substring(i * 2, i * 2 + 2), radix: 16);
-          }),
-        );
-      }
-    }
-    if (res is Map && res['data'] is List) {
-      return Uint8List.fromList(List<int>.from(res['data']));
-    }
-    if (res is List) {
-      return Uint8List.fromList(List<int>.from(res));
-    }
-    throw StateError('unexpected public_key response: $res');
+    return parseBytea(res);
   }
 
   static Future<List<Map<String, dynamic>>>

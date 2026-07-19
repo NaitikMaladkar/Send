@@ -428,29 +428,10 @@ class ChatService {
     return SendCrypto.decrypt(key: key, ciphertext: ct, iv: iv);
   }
 
-  /// PostgREST returns `bytea` columns in different shapes depending on the
-  /// Accept / arrayheader configuration. Handle them all.
-  static Uint8List _parseBytea(dynamic v) {
-    if (v is Uint8List) return v;
-    if (v is List) return Uint8List.fromList(List<int>.from(v));
-    if (v is String) {
-      try {
-        return base64Decode(v);
-      } catch (_) {
-        if (v.startsWith(r'\x')) {
-          final hex = v.substring(2);
-          return Uint8List.fromList(
-            List<int>.generate(hex.length ~/ 2, (i) {
-              return int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
-            }),
-          );
-        }
-        rethrow;
-      }
-    }
-    if (v is Map && v['data'] is List) {
-      return Uint8List.fromList(List<int>.from(v['data']));
-    }
-    throw StateError('cannot parse bytea: $v (${v.runtimeType})');
-  }
+  /// PostgREST returns `bytea` columns as `\x<hex>` strings. Because we
+  /// send bytea RPC params as base64-encoded strings, Postgres stores the
+  /// UTF-8 bytes of that base64 string. Use [SupabaseBackend.parseBytea]
+  /// which handles the full round-trip (hex → utf8 → base64 → raw bytes).
+  static Uint8List _parseBytea(dynamic v) =>
+      SupabaseBackend.parseBytea(v);
 }

@@ -6,26 +6,54 @@ allprojects {
 }
 
 rootProject.buildDir = "../build"
-subprojects {
-    project.buildDir = "${rootProject.buildDir}/${project.name}"
-}
-subprojects {
-    project.evaluationDependsOn(":app")
-}
 
-// Fix for plugins that don't declare a namespace (required by AGP 8+).
-subprojects {
-    plugins.withId('com.android.library') {
-        if (android.namespace == null) {
-            def manifest = file("${project.projectDir}/src/main/AndroidManifest.xml")
-            if (manifest.exists()) {
-                def pkg = new groovy.xml.XmlSlurper().parse(manifest).@package.toString()
-                if (pkg) {
-                    android.namespace = pkg
+// Single subprojects block — registers hooks BEFORE any sub-project is
+// evaluated. Multiple subprojects {} blocks were failing with
+// "Cannot run Project.afterEvaluate(Closure) when the project is already
+// evaluated" because evaluationDependsOn(":app") was forcing early eval.
+subprojects { project ->
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+
+    // Expose a `flutter` extension on every sub-project BEFORE its
+    // build.gradle is evaluated, so older plugin build.gradle files
+    // (e.g. app_links 6.4.1) that reference `flutter.compileSdkVersion`
+    // keep working under Flutter 3.24 + AGP 8.x. Flutter 3.27+ does
+    // this automatically; this is the back-port.
+    if (project.path != ':app' && !project.extensions.findByName('flutter')) {
+        project.extensions.create('flutter', FlutterPluginExtension)
+    }
+
+    project.afterEvaluate {
+        plugins.withId('com.android.library') {
+            // Force compileSdk on plugin sub-projects that don't declare it.
+            if (android.compileSdk == null) {
+                android.compileSdk = 36
+            }
+            // Fix plugins with missing minSdk.
+            try {
+                if (android.defaultConfig.minSdkVersion == null) {
+                    android.defaultConfig.minSdkVersion 26
+                }
+            } catch (ignore) {}
+            // Fix for plugins that don't declare a namespace (AGP 8+).
+            if (android.namespace == null) {
+                def manifest = file("${project.projectDir}/src/main/AndroidManifest.xml")
+                if (manifest.exists()) {
+                    def pkg = new groovy.xml.XmlSlurper().parse(manifest).@package.toString()
+                    if (pkg) {
+                        android.namespace = pkg
+                    }
                 }
             }
         }
     }
+}
+
+class FlutterPluginExtension {
+    int compileSdkVersion = 36
+    int minSdkVersion = 26
+    int targetSdkVersion = 34
+    String ndkVersion = ''
 }
 
 tasks.register("clean", Delete) {
