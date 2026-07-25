@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
@@ -10,7 +12,7 @@ import '../services/haptic_service.dart';
 import '../services/supabase_backend.dart';
 
 /// Two-pane screen:
-///  1. "MyLink" — generate a 24h rotating code + QR code to share.
+///  1. "MyLink" — generate a 25-min rotating code + QR code to share.
 ///  2. "Add friend" — paste someone else's code OR scan their QR.
 class AddFriendScreen extends StatefulWidget {
   const AddFriendScreen({super.key});
@@ -42,14 +44,56 @@ class _AddFriendScreenState extends State<AddFriendScreen> with SingleTickerProv
   String? _lastScannedCode;
   bool _scannerPaused = false;
 
+  /// When our rotating code was generated (for countdown display + auto-expiry).
+  DateTime? _codeGeneratedAt;
+
+  /// Auto-expiry timer — fires at the 25-min mark to clear the stale code.
+  Timer? _expiryTimer;
+
+  /// 1-second ticker for the live countdown display.
+  Timer? _countdownTimer;
+
   @override
   void dispose() {
     _tab.dispose();
     _codeCtrl.dispose();
     _introCtrl.dispose();
     _scannerController.dispose();
+    _expiryTimer?.cancel();
+    _countdownTimer?.cancel();
     super.dispose();
   }
+
+  void _startExpiryTimer() {
+    _expiryTimer?.cancel();
+    _countdownTimer?.cancel();
+    if (_codeGeneratedAt == null) return;
+    final expiry = _codeGeneratedAt!.add(const Duration(minutes: 25));
+    _expiryTimer = Timer(expiry.difference(DateTime.now()), () {
+      if (!mounted) return;
+      setState(() {
+        _myCode = null;
+        _codeGeneratedAt = null;
+        _msg = 'Code expired. Tap "Generate" for a fresh one.';
+        _isError = false;
+      });
+    });
+    // 1-second countdown refresh
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  String? get _remainingLabel {
+    if (_codeGeneratedAt == null || _myCode == null) return null;
+    final expiry = _codeGeneratedAt!.add(const Duration(minutes: 25));
+    final remaining = expiry.difference(DateTime.now());
+    if (remaining.isNegative) return 'expired';
+    final m = remaining.inMinutes;
+    final s = remaining.inSeconds % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
 
   Future<void> _genCode() async {
     setState(() {
@@ -59,11 +103,13 @@ class _AddFriendScreenState extends State<AddFriendScreen> with SingleTickerProv
     });
     try {
       final c = await SupabaseBackend.createRotatingCode(null);
+      _codeGeneratedAt = DateTime.now();
       setState(() {
         _myCode = c;
-        _msg = 'Code generated — valid for 24 hours.';
+        _msg = 'Code generated — valid for 25 minutes (one-shot).';
         _isError = false;
       });
+      _startExpiryTimer();
       await HapticService.light();
     } catch (e) {
       setState(() {
@@ -117,14 +163,16 @@ class _AddFriendScreenState extends State<AddFriendScreen> with SingleTickerProv
       final friend = Friend(
         identityId: resolved.identityId,
         publicKey: resolved.publicKey.toList(),
-        alias: null,
+        alias: resolved.displayName.isNotEmpty ? resolved.displayName : null,
         friendedAt: DateTime.now(),
       );
       await auth.addFriend(friend);
       await HapticService.medium();
       if (mounted) {
         setState(() {
-          _msg = 'Friend request sent. You can chat once they accept.';
+          _msg = resolved.displayName.isNotEmpty
+              ? 'Friend request sent to ${resolved.displayName}. You can chat once they accept.'
+              : 'Friend request sent. You can chat once they accept.';
           _isError = false;
           _codeCtrl.clear();
           _introCtrl.clear();
@@ -200,9 +248,10 @@ class _AddFriendScreenState extends State<AddFriendScreen> with SingleTickerProv
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
         const SizedBox(height: 6),
         const Text(
-            'Generate a fresh, 24-hour code and share it with the person you '
+            'Generate a fresh, 25-minute code and share it with the person you '
             'want to talk to. They paste it on their end — or scan the QR — '
-            'to send you a friend request.',
+            'to send you a friend request. The code is one-shot: once they '
+            'scan it, you\'ll need a new one for the next person.',
             style: TextStyle(color: Colors.grey, fontSize: 13)),
         const SizedBox(height: 20),
         if (_myCode == null)
@@ -218,6 +267,19 @@ class _AddFriendScreenState extends State<AddFriendScreen> with SingleTickerProv
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  if (_remainingLabel != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.timer_outlined, size: 16, color: Colors.grey),
+                          const SizedBox(width: 4),
+                          Text('Expires in $_remainingLabel',
+                              style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                        ],
+                      ),
+                    ),
                   Center(
                     child: Container(
                       padding: const EdgeInsets.all(12),

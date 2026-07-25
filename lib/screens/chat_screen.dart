@@ -229,7 +229,7 @@ class _ChatScreenState extends State<ChatScreen> {
       plaintext: text,
       kind: MessageKind.text,
       createdAt: DateTime.now(),
-      ttlSeconds: widget.friend.disappearingTtlSeconds ?? auth.disappearingDefault,
+      ttlSeconds: DisappearingConfig.seconds,
     );
     _messages.add(optimistic);
     setState(() {});
@@ -553,7 +553,6 @@ class _ChatScreenState extends State<ChatScreen> {
             onSelected: (v) => _onMenuAction(v, f),
             itemBuilder: (_) => [
               const PopupMenuItem(value: 'alias', child: Text('Edit alias')),
-              const PopupMenuItem(value: 'disappearing', child: Text('Disappearing')),
               PopupMenuItem(
                 value: 'onion',
                 child: Text(f.onionRouted
@@ -572,7 +571,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     icon: Icons.lock_outline,
                     title: 'No messages yet',
                     subtitle:
-                        'Say hi — your messages are end-to-end encrypted\nand will disappear based on your settings.',
+                        'Say hi — your messages are end-to-end encrypted\nand disappear after 24 hours.',
                   )
                 : ListView.builder(
                     controller: _scroll,
@@ -699,25 +698,6 @@ class _ChatScreenState extends State<ChatScreen> {
         );
         if (result != null) {
           await auth.updateFriend(f.copyWith(alias: result.isEmpty ? null : result));
-          if (mounted) setState(() {});
-        }
-        break;
-      case 'disappearing':
-        final selected = await showDialog<int>(
-          context: context,
-          builder: (_) => SimpleDialog(
-            title: const Text('Disappearing messages'),
-            children: DisappearingConfig.presets.map((p) {
-              return SimpleDialogOption(
-                onPressed: () => Navigator.pop(context, p.seconds),
-                child: Text(p.label),
-              );
-            }).toList(),
-          ),
-        );
-        if (selected != null) {
-          await auth.updateFriend(
-              f.copyWith(disappearingTtlSeconds: selected));
           if (mounted) setState(() {});
         }
         break;

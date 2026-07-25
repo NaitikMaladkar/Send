@@ -47,6 +47,7 @@ class _FriendsTabState extends State<FriendsTab> {
   Future<void> _accept(Map<String, dynamic> row) async {
     final auth = context.read<AuthService>();
     final peerId = row['from_identity'] as String;
+    final peerName = (row['display_name'] as String?) ?? '';
     try {
       await SupabaseBackend.respondFriendRequest(row['id'] as String, true);
       final pub = await SupabaseBackend.fetchIdentityPublicKey(peerId);
@@ -54,14 +55,17 @@ class _FriendsTabState extends State<FriendsTab> {
         await auth.addFriend(Friend(
           identityId: peerId,
           publicKey: pub.toList(),
-          alias: null,
+          alias: peerName.isNotEmpty ? peerName : null,
           friendedAt: DateTime.now(),
         ));
       }
       await HapticService.medium();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Friend added — you can chat now')),
+          SnackBar(
+              content: Text(peerName.isNotEmpty
+                  ? '$peerName added — you can chat now'
+                  : 'Friend added — you can chat now')),
         );
       }
       await _refresh();
@@ -126,7 +130,7 @@ class _FriendsTabState extends State<FriendsTab> {
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                     content: Text(
-                        'Open a chat → ⋮ menu → Disappearing to set per-friend TTL')));
+                        'All messages disappear after 24 hours — no override available.')));
               }
             },
           ),
@@ -188,8 +192,16 @@ class _FriendsTabState extends State<FriendsTab> {
                   for (final row in _pending)
                     ListTile(
                       leading: const CircleAvatar(child: Icon(Icons.person)),
-                      title: Text(
-                          'From ${(row['from_identity'] as String).substring(0, 8)}…'),
+                      title: Text(() {
+                        final name = row['display_name'] as String?;
+                        final pid = row['public_id'];
+                        if (name != null && name.isNotEmpty) {
+                          return pid != null
+                              ? '$name · ID:${(pid is int ? pid : int.tryParse('$pid') ?? 0).toString().padLeft(8, '0')}'
+                              : name;
+                        }
+                        return 'From ${(row['from_identity'] as String).substring(0, 8)}…';
+                      }()),
                       subtitle: Text(row['intro'] as String? ?? ''),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,

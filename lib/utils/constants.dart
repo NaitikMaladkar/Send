@@ -3,7 +3,7 @@
 /// These values are intentionally committed to the repo. The anon key is
 /// designed to be embedded in client apps — Row Level Security on every
 /// table ensures it cannot read or write data without a valid per-identity
-/// auth token issued by `register_identity()`.
+/// auth token issued by `signup()` / `signin()`.
 class SupabaseConfig {
   static const String url = 'https://xtpsvneqdsaiqtqxakhu.supabase.co';
   static const String anonKey =
@@ -23,19 +23,26 @@ class InactivityConfig {
 }
 
 /// Disappearing-messages configuration.
+///
+/// Messages ALWAYS disappear after exactly 24 hours — there is no override.
+/// This is enforced server-side by a CHECK constraint on the messages and
+/// group_messages tables (`ttl_seconds = 86400`), and the trigger
+/// `compute_expires_at` sets `expires_at = created_at + interval '24 hours'`.
+/// A `sweep_expired_messages` cron hard-deletes rows past their expiry.
 class DisappearingConfig {
-  static const int minSeconds = 3600;       // 1 hour
-  static const int defaultSeconds = 604800; // 7 days
-  static const int maxSeconds = 2592000;    // 30 days
+  static const int seconds = 86400; // 24 hours, fixed
+}
 
-  /// Preset choices offered in the UI.
-  static const List<({String label, int seconds})> presets = [
-    (label: '1 hour',  seconds: 3600),
-    (label: '24 hours', seconds: 86400),
-    (label: '7 days',   seconds: 604800),
-    (label: '14 days',  seconds: 1209600),
-    (label: '30 days',  seconds: 2592000),
-  ];
+/// Rotating friend-add code configuration.
+class RotatingCodeConfig {
+  /// Code validity window. The code auto-expires after this duration.
+  static const Duration validity = Duration(minutes: 25);
+
+  /// Code is one-shot: after a successful `resolve_code`, the code is
+  /// marked used and any subsequent attempt raises 'code already used'.
+  /// The creator's app must call `create_rotating_code` again to refresh
+  /// for the next share.
+  static const bool oneShot = true;
 }
 
 /// Voice-message configuration.
@@ -60,5 +67,19 @@ class OnionConfig {
   static const Duration relayPollInterval = Duration(seconds: 10);
 }
 
+/// Passkey rules — exactly 8 chars, lowercase alphanumeric.
+class PasskeyConfig {
+  static const int length = 8;
+  static const String pattern = r'^[a-z0-9]{8}$';
+  static const String alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+}
+
+/// App PIN rules — exactly 4 digits.
+class PinConfig {
+  static const int length = 4;
+  static const String pattern = r'^[0-9]{4}$';
+}
+
 /// Available app themes.
 enum AppThemeMode { system, light, dark }
+

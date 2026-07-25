@@ -14,15 +14,6 @@ rootProject.buildDir = "../build"
 subprojects { project ->
     project.buildDir = "${rootProject.buildDir}/${project.name}"
 
-    // Expose a `flutter` extension on every sub-project BEFORE its
-    // build.gradle is evaluated, so older plugin build.gradle files
-    // (e.g. app_links 6.4.1) that reference `flutter.compileSdkVersion`
-    // keep working under Flutter 3.24 + AGP 8.x. Flutter 3.27+ does
-    // this automatically; this is the back-port.
-    if (project.path != ':app' && !project.extensions.findByName('flutter')) {
-        project.extensions.create('flutter', FlutterPluginExtension)
-    }
-
     project.afterEvaluate {
         plugins.withId('com.android.library') {
             // Force compileSdk on plugin sub-projects that don't declare it.
@@ -47,13 +38,6 @@ subprojects { project ->
             }
         }
     }
-}
-
-class FlutterPluginExtension {
-    int compileSdkVersion = 36
-    int minSdkVersion = 26
-    int targetSdkVersion = 34
-    String ndkVersion = ''
 }
 
 tasks.register("clean", Delete) {

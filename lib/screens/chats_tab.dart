@@ -106,8 +106,11 @@ class _ChatsTabState extends State<ChatsTab> {
     _frChannel = SupabaseBackend.subscribeFriendRequests(
       identityId: id,
       onInsert: (row) async {
-        final fromId = row['from_identity'] as String;
-        await NotificationService.showFriendRequest(fromId: fromId);
+        final name = row['display_name'] as String?;
+        await NotificationService.showFriendRequest(
+            fromId: name != null && name.isNotEmpty
+                ? name
+                : (row['from_identity'] as String));
         if (mounted) setState(() {});
       },
     );
@@ -122,15 +125,18 @@ class _ChatsTabState extends State<ChatsTab> {
           if (auth.friend(otherId) == null) {
             try {
               final pub = await SupabaseBackend.fetchIdentityPublicKey(otherId);
+              final name = (row['display_name'] as String?) ?? '';
               await auth.addFriend(Friend(
                 identityId: otherId,
                 publicKey: pub.toList(),
-                alias: null,
+                alias: name.isNotEmpty ? name : null,
                 friendedAt: DateTime.now(),
               ));
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Your friend request was accepted')),
+                  SnackBar(content: Text(name.isNotEmpty
+                      ? '$name accepted your friend request'
+                      : 'Your friend request was accepted')),
                 );
               }
             } catch (_) {}
@@ -148,10 +154,11 @@ class _ChatsTabState extends State<ChatsTab> {
         if (auth.friend(otherId) != null) continue;
         try {
           final pub = await SupabaseBackend.fetchIdentityPublicKey(otherId);
+          final name = (row['display_name'] as String?) ?? '';
           await auth.addFriend(Friend(
             identityId: otherId,
             publicKey: pub.toList(),
-            alias: null,
+            alias: name.isNotEmpty ? name : null,
             friendedAt: DateTime.now(),
           ));
         } catch (_) {}

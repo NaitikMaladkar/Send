@@ -19,6 +19,8 @@ class SendKeystore {
   static const _kGroupsPrefix = 'send.groups.'; // per-identity
   static const _kSharedKeyPrefix = 'send.shared.'; // per-(me,peer) cached ECDH key
   static const _kGroupKeyPrefix = 'send.groupkey.'; // per-(me,group) cached group key
+  static const _kPin = 'send.pin'; // 4-digit app PIN (device-only)
+  static const _kPinSetAt = 'send.pin.setAt'; // ISO timestamp (for reset UX)
 
   // ---------- identities (multi-account) ----------
 
@@ -105,6 +107,23 @@ class SendKeystore {
       String myId, String groupId, String hex) async {
     final k = '$_kGroupKeyPrefix$myId.$groupId';
     await _storage.write(key: k, value: hex);
+  }
+
+  // ---------- PIN (device-only, 4-digit app lock) ----------
+
+  /// Read the stored PIN. Returns null if no PIN has been set.
+  static Future<String?> loadPin() => _storage.read(key: _kPin);
+
+  static Future<bool> hasPin() async => (await _storage.read(key: _kPin)) != null;
+
+  static Future<void> savePin(String pin) async {
+    await _storage.write(key: _kPin, value: pin);
+    await _storage.write(key: _kPinSetAt, value: DateTime.now().toIso8601String());
+  }
+
+  static Future<void> clearPin() async {
+    await _storage.delete(key: _kPin);
+    await _storage.delete(key: _kPinSetAt);
   }
 
   // ---------- nuke everything (logout / delete identity) ----------

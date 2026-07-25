@@ -111,6 +111,93 @@ class SendCrypto {
   }
 
   // ============================================================
+  //  Passkey-based private key protection.
+  //
+  //  When a user signs up, we:
+  //    1. Generate a fresh 16-byte salt
+  //    2. Derive a 32-byte AES key via PBKDF2-HMAC-SHA256(passkey, salt, 200k iters)
+  //    3. Encrypt the X25519 private key (32 bytes) with AES-256-GCM
+  //    4. Upload (salt || iv || ciphertext+tag) to the server in the
+  //       `encrypted_private_key` column. The server cannot decrypt this
+  //       blob because it never sees the passkey in plaintext — only the
+  //       bcrypt hash (which is unsuitable for key derivation).
+  //
+  //  On sign-in, the server returns the encrypted blob; we run the same
+  //  PBKDF2 pass to re-derive the AES key and decrypt the private key.
+  // ============================================================
+
+  static final Pbkdf2 _pbkdf2 = Pbkdf2(
+    macAlgorithm: Hmac.sha256(),
+    iterations: 200000,
+    bits: 256,
+  );
+
+  /// Generate a fresh 16-byte salt for passkey→key derivation.
+  static Future<Uint8List> generatePasskeySalt() async {
+    final r = DateTime.now().microsecondsSinceEpoch;
+    final seed = Uint8List.fromList([
+      ...utf8.encode('send-passkey-salt-$r'),
+      ...List<int>.generate(16, (i) => (r >> (i % 8)) & 0xff),
+    ]);
+    final h = await _sha256.hash(seed);
+    return Uint8List.fromList(h.bytes.sublist(0, 16));
+  }
+
+  /// Derive a 32-byte AES key from a passkey + salt via PBKDF2-HMAC-SHA256.
+  static Future<Uint8List> derivePasskeyKey(
+      String passkey, Uint8List salt) async {
+    final derived = await _pbkdf2.deriveKey(
+      secretKey: SecretKey(utf8.encode(passkey)),
+      nonce: salt.toList(),
+    );
+    final out = await derived.extractBytes();
+    return Uint8List.fromList(out);
+  }
+
+  /// Encrypt the X25519 private key (32 bytes) with the passkey-derived key.
+  /// Returns a self-contained blob: salt(16) || iv(12) || ciphertext(32) || tag(16) = 76 bytes.
+  static Future<Uint8List> encryptPrivateKey({
+    required Uint8List privateKey,
+    required String passkey,
+    Uint8List? salt,
+  }) async {
+    final s = salt ?? await generatePasskeySalt();
+    final key = await derivePasskeyKey(passkey, s);
+    final enc = await encrypt(key: key, plaintext: privateKey);
+    // Pack: salt || iv || ciphertext+tag
+    return Uint8List.fromList([...s, ...enc.iv, ...enc.ciphertext]);
+  }
+
+  /// Decrypt the private key blob (salt || iv || ciphertext+tag) with the passkey.
+  /// Throws on integrity failure (wrong passkey, corrupted blob, etc.).
+  static Future<Uint8List> decryptPrivateKey({
+    required Uint8List blob,
+    required String passkey,
+  }) async {
+    if (blob.length < 16 + 12 + 16 + 32) {
+      throw ArgumentError('invalid private key blob (too short)');
+    }
+    final salt = blob.sublist(0, 16);
+    final iv = blob.sublist(16, 28);
+    final ct = blob.sublist(28); // ciphertext + 16-byte GCM tag
+    final key = await derivePasskeyKey(passkey, salt);
+    return decrypt(key: key, ciphertext: ct, iv: iv);
+  }
+
+  /// Generate a random 8-character passkey (a-z, 0-9). Used by the signup
+  /// suggestion button — the user can also type their own.
+  static String generateRandomPasskey() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final r = DateTime.now().microsecondsSinceEpoch;
+    final out = StringBuffer();
+    for (var i = 0; i < 8; i++) {
+      final idx = ((r >> (i * 4)) ^ (i * 17 + 3)) % chars.length;
+      out.write(chars[idx.abs() % chars.length]);
+    }
+    return out.toString();
+  }
+
+  // ============================================================
   //  Onion routing — layered envelope helpers.
   //
   //  An onion envelope is a chain of AES-GCM layers. Each layer's

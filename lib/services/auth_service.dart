@@ -18,18 +18,27 @@ class AuthService extends ChangeNotifier {
   List<Group> _groups = [];
   Timer? _heartbeat;
 
-  /// Per-identity privacy settings.
-  int _disappearingDefault = 604800; // 7d
+  /// Per-identity privacy settings. Disappearing is fixed at 24h.
   bool _readReceipts = true;
+
+  /// In-session PIN unlock flag. Reset on every cold start.
+  bool _pinUnlocked = false;
 
   Identity? get active => _active;
   List<Friend> get friends => _friends;
   List<Group> get groups => _groups;
   bool get hasIdentity => _active != null;
-  int get disappearingDefault => _disappearingDefault;
   bool get readReceipts => _readReceipts;
+  bool get pinUnlocked => _pinUnlocked;
+
+  /// Mark PIN as unlocked for this session. Reset by re-launching the app.
+  void markPinUnlocked() {
+    _pinUnlocked = true;
+    notifyListeners();
+  }
 
   /// Load saved identities from secure storage + restore active session.
+  /// Does NOT verify PIN — caller (splash_screen) handles PIN gating.
   Future<void> init() async {
     final list = await SendKeystore.loadIdentities();
     if (list.isEmpty) return;
@@ -50,9 +59,7 @@ class AuthService extends ChangeNotifier {
   Future<void> _syncFromServer() async {
     if (_active == null) return;
     try {
-      final settings = await SupabaseBackend.getPrivacySettings();
-      _disappearingDefault = settings.disappearingSeconds;
-      _readReceipts = settings.readReceipts;
+      _readReceipts = await SupabaseBackend.getPrivacySettings();
     } catch (_) {}
     try {
       final aliases = await SupabaseBackend.fetchFriendAliases();
@@ -74,7 +81,6 @@ class AuthService extends ChangeNotifier {
       final newGroups = <Group>[];
       for (final row in rows) {
         final gid = row['group_id'] as String;
-        // Fetch members
         try {
           final memberRows = await SupabaseBackend.listGroupMembers(gid);
           final memberIds =
@@ -93,23 +99,43 @@ class AuthService extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// Create a brand-new anonymous identity on this device.
-  Future<Identity> createIdentity() async {
+  /// Sign up: generate X25519 keypair, encrypt private key with the passkey,
+  /// upload to server. The server returns the assigned public_id + auth_token.
+  Future<Identity> signUp({
+    required String displayName,
+    required String passkey,
+  }) async {
     final kp = await SendCrypto.generateKeyPair();
     final pub = await SendCrypto.exportPublic(kp);
     final priv = await SendCrypto.exportPrivate(kp);
+    final salt = await SendCrypto.generatePasskeySalt();
+    final encPriv = await SendCrypto.encryptPrivateKey(
+      privateKey: priv,
+      passkey: passkey,
+      salt: salt,
+    );
 
-    final reg = await SupabaseBackend.registerIdentity(pub);
+    final reg = await SupabaseBackend.signup(
+      displayName: displayName,
+      passkey: passkey,
+      publicKey: pub,
+      encryptedPrivateKey: encPriv,
+      passkeySalt: salt,
+    );
 
     final id = Identity(
       id: reg.id,
       authToken: reg.authToken,
-      displayCode: reg.displayCode,
+      publicId: reg.publicId,
+      displayName: reg.displayName,
       publicKey: pub,
       privateKey: priv,
+      passkeySalt: salt,
     );
 
     final list = await SendKeystore.loadIdentities();
+    // Remove any stale local identity with the same id (defensive)
+    list.removeWhere((e) => e.id == id.id);
     list.add(id);
     await SendKeystore.saveIdentities(list);
     await SendKeystore.setActiveIdentity(id.id);
@@ -117,10 +143,45 @@ class AuthService extends ChangeNotifier {
     _active = id;
     _friends = [];
     _groups = [];
-    _disappearingDefault = 604800;
     _readReceipts = true;
     _applyHeaders();
     _startHeartbeat();
+    notifyListeners();
+    return id;
+  }
+
+  /// Sign in with public_id + passkey. Server returns the encrypted private
+  /// key blob; we decrypt it locally with the passkey.
+  Future<Identity> signIn({required int publicId, required String passkey}) async {
+    final res = await SupabaseBackend.signin(publicId: publicId, passkey: passkey);
+    final priv = await SendCrypto.decryptPrivateKey(
+      blob: res.encryptedPrivateKey,
+      passkey: passkey,
+    );
+
+    final id = Identity(
+      id: res.id,
+      authToken: res.authToken,
+      publicId: publicId,
+      displayName: res.displayName,
+      publicKey: res.publicKey,
+      privateKey: priv,
+      passkeySalt: res.passkeySalt,
+    );
+
+    final list = await SendKeystore.loadIdentities();
+    list.removeWhere((e) => e.id == id.id);
+    list.add(id);
+    await SendKeystore.saveIdentities(list);
+    await SendKeystore.setActiveIdentity(id.id);
+
+    _active = id;
+    _friends = [];
+    _groups = [];
+    _readReceipts = true;
+    _applyHeaders();
+    _startHeartbeat();
+    await _syncFromServer();
     notifyListeners();
     return id;
   }
@@ -184,15 +245,6 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Update privacy settings locally + push to server.
-  Future<void> setDisappearingDefault(int seconds) async {
-    _disappearingDefault = seconds;
-    try {
-      await SupabaseBackend.updateDisappearingDefault(seconds);
-    } catch (_) {}
-    notifyListeners();
-  }
-
   Future<void> setReadReceipts(bool enabled) async {
     _readReceipts = enabled;
     try {
@@ -223,30 +275,12 @@ class AuthService extends ChangeNotifier {
     return derived;
   }
 
-  /// Derive (or load cached) per-(me, group) symmetric key. Group keys are
-  /// derived deterministically from the group id + creator's keypair so all
-  /// members derive the same key — wait, no, that requires members to share
-  /// a secret. Instead, the group CREATOR generates a random symmetric key
-  /// and encrypts it to each member's pubkey out-of-band.
-  ///
-  /// For v1.0 simplicity: the group key is derived deterministically from
-  /// the group_id via HKDF with the creator's private key. This requires
-  /// that all members know the creator's pubkey (true — they're all
-  /// friends). The HKDF info string includes the group id, so each group
-  /// has a unique key.
+  /// Derive (or load cached) per-(me, group) symmetric key.
   Future<Uint8List> groupKey(String groupId, String creatorId) async {
     if (_active == null) throw StateError('no active identity');
     final cached = await SendKeystore.groupKey(_active!.id, groupId);
     if (cached != null) return hexDecode(cached);
 
-    // Derive from creator's pubkey + my private key via ECDH, with the
-    // group id as HKDF info. This works because:
-    //   - The creator is in the members list
-    //   - All members have the creator's pubkey cached (they're all
-    //     friends with the creator)
-    //   - ECDH(myPriv, creatorPub) is symmetric — both sides derive the
-    //     same secret
-    // The HKDF info 'send:group:<groupId>' makes this group-specific.
     final creator = _friends.firstWhere(
       (f) => f.identityId == creatorId,
       orElse: () => throw StateError('creator $creatorId not in friends'),
@@ -277,15 +311,37 @@ class AuthService extends ChangeNotifier {
     return null;
   }
 
-  /// Delete the active identity locally and from server.
-  Future<void> deleteActive() async {
+  /// Bilateral account vanish: wipes everything from server AND local device.
+  ///
+  /// Server-side `vanish_account()` deletes:
+  ///   - messages I sent OR received (both sides)
+  ///   - group messages I sent OR received
+  ///   - group memberships
+  ///   - friend_requests (their list loses me too)
+  ///   - friend_aliases (their alias for me is gone)
+  ///   - hidden-message markers
+  ///   - rotating codes
+  ///   - relay hops
+  ///   - the identity row itself (auth_token becomes invalid)
+  ///
+  /// Then we wipe local secure storage for this identity and clear PIN.
+  Future<void> vanishAccount() async {
     if (_active == null) return;
     _heartbeat?.cancel();
     final deletedId = _active!.id;
+    try {
+      await SupabaseBackend.vanishAccount();
+    } catch (_) {
+      // Even if the server call fails (network issue, expired token, etc.),
+      // we still wipe local state so the user is logged out.
+    }
     await SendKeystore.wipeIdentity(deletedId);
+    // Also clear the PIN — device is now unowned.
+    await SendKeystore.clearPin();
     _active = null;
     _friends = [];
     _groups = [];
+    _pinUnlocked = false;
     SupabaseBackend.clearActiveIdentity();
     final list = await SendKeystore.loadIdentities();
     if (list.isNotEmpty) {

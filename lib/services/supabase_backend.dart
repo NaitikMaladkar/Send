@@ -76,19 +76,70 @@ class SupabaseBackend {
     return jsonDecode(res.body);
   }
 
-  // ---------- identity ----------
+  // ---------- identity: signup / signin / vanish ----------
 
-  static Future<({String id, String authToken, String displayCode})>
-      registerIdentity(Uint8List publicKey) async {
-    final res = await _rpc('register_identity', {
+  /// Signup RPC. Creates a new account and returns the server-assigned
+  /// (id, public_id, auth_token, display_name). The passkey is bcrypt-hashed
+  /// server-side; the private key is encrypted client-side with the passkey
+  /// via PBKDF2+AES-GCM, and the encrypted blob is uploaded to the server
+  /// for re-login.
+  static Future<({String id, int publicId, String authToken, String displayName})>
+      signup({
+    required String displayName,
+    required String passkey,
+    required Uint8List publicKey,
+    required Uint8List encryptedPrivateKey,
+    required Uint8List passkeySalt,
+  }) async {
+    final res = await _rpc('signup', {
+      'p_display_name': displayName,
+      'p_passkey': passkey,
       'p_public_key': base64Encode(publicKey),
+      'p_encrypted_private_key': base64Encode(encryptedPrivateKey),
+      'p_passkey_salt': base64Encode(passkeySalt),
+    });
+    final row = (res as List).first as Map<String, dynamic>;
+    return (
+      id: row['id'] as String,
+      publicId: (row['public_id'] is int)
+          ? row['public_id'] as int
+          : int.parse('${row['public_id']}'),
+      authToken: row['auth_token'] as String,
+      displayName: row['display_name'] as String,
+    );
+  }
+
+  /// Signin RPC. Verifies passkey against the bcrypt hash, rotates the
+  /// auth_token, and returns the encrypted private key blob + salt so the
+  /// client can decrypt it locally with the passkey.
+  static Future<({
+    String id,
+    String authToken,
+    String displayName,
+    Uint8List publicKey,
+    Uint8List encryptedPrivateKey,
+    Uint8List passkeySalt,
+  })> signin({required int publicId, required String passkey}) async {
+    final res = await _rpc('signin', {
+      'p_public_id': publicId,
+      'p_passkey': passkey,
     });
     final row = (res as List).first as Map<String, dynamic>;
     return (
       id: row['id'] as String,
       authToken: row['auth_token'] as String,
-      displayCode: row['display_code'] as String,
+      displayName: row['display_name'] as String? ?? '',
+      publicKey: parseBytea(row['public_key']),
+      encryptedPrivateKey: parseBytea(row['encrypted_private_key']),
+      passkeySalt: parseBytea(row['passkey_salt']),
     );
+  }
+
+  /// Bilateral account vanish: deletes messages from both sides, friend
+  /// entries, group memberships, group messages, aliases, codes, relay hops,
+  /// and finally the identity row. After this call, the auth_token is dead.
+  static Future<void> vanishAccount() async {
+    await _rpc('vanish_account');
   }
 
   // ---------- heartbeat ----------
@@ -104,13 +155,14 @@ class SupabaseBackend {
     return res as String;
   }
 
-  static Future<({String identityId, Uint8List publicKey})> resolveCode(
-      String code) async {
+  static Future<({String identityId, Uint8List publicKey, String displayName})>
+      resolveCode(String code) async {
     final res = await _rpc('resolve_code', {'p_code': code});
     final row = (res as List).first as Map<String, dynamic>;
     return (
       identityId: row['identity_id'] as String,
       publicKey: parseBytea(row['public_key']),
+      displayName: (row['display_name'] as String?) ?? '',
     );
   }
 
@@ -266,18 +318,12 @@ class SupabaseBackend {
 
   // ---------- privacy settings ----------
 
-  static Future<({int disappearingSeconds, bool readReceipts})>
-      getPrivacySettings() async {
+  static Future<bool> getPrivacySettings() async {
     final res = await _rpc('get_privacy_settings');
-    final row = (res as List).first as Map<String, dynamic>;
-    return (
-      disappearingSeconds: row['disappearing_seconds'] as int,
-      readReceipts: row['read_receipts'] as bool,
-    );
-  }
-
-  static Future<void> updateDisappearingDefault(int seconds) async {
-    await _rpc('update_disappearing_default', {'p_seconds': seconds});
+    final list = res as List;
+    if (list.isEmpty) return true;
+    final row = list.first as Map<String, dynamic>;
+    return (row['read_receipts_enabled'] as bool?) ?? true;
   }
 
   static Future<void> setReadReceiptsEnabled(bool enabled) async {
